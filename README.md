@@ -5,7 +5,7 @@ This study focuses on investigating the role of affective signals in action plan
 
 Authors: Berat Biçer, E.Batuhan Kaynak, Hamdi Dibeklioğlu
 
-## GitHub Markdown To-Do List for Affective Signals in Autonomous Agents Research
+## To-Do List
 
 ### Preparatory Phase
 - [ ] **Literature Review**
