@@ -13,7 +13,6 @@ if torch.cuda.is_available():
 
 import torch.nn as nn
 import torch.nn.functional as F
-
 import gymnasium as gym
 import argparse, string, random
 from pathlib import Path
@@ -21,7 +20,6 @@ import math
 import matplotlib.pyplot as plt
 import pickle
 import glob
-
 from random_maze1_3 import RandomMaze
 
 import warnings
@@ -29,37 +27,99 @@ warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+def initialize_bias_conv(layer):
+    if layer.bias is not None:
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
+        if fan_in != 0:
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(layer.bias, -bound, bound)
+
+def initialize_bias_linear(layer):
+    if layer.bias is not None:
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
+        bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+        nn.init.uniform_(layer.bias, -bound, bound)
+
+def conv_output_shape(x, kernel_size=1, stride=1, pad=0, dilation=1):
+    return math.floor(((x + (2 * pad) - (dilation * (kernel_size - 1)) - 1) / stride) + 1)
+
 class CriticNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim):
+    def __init__(self, state_dim, action_dim, hidden_dim):
         super(CriticNetwork, self).__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
 
-        self.layers1 = nn.Sequential(
-            nn.Linear(state_dim[0]*state_dim[1] + action_dim, 400),
-            nn.ReLU(),
-            nn.Linear(400, 300),
-            nn.ReLU(),
-            nn.Linear(300, 1),
-        )
+        self.layers1, self.output_layer1 = self.get_layers()
+        self.layers2, self.output_layer2 = self.get_layers()
 
-        self.layers2 = nn.Sequential(
-            nn.Linear(state_dim[0]*state_dim[1] + action_dim, 400),
-            nn.ReLU(),
-            nn.Linear(400, 300),
-            nn.ReLU(),
-            nn.Linear(300, 1),
-        )
+    def get_layers(self):
+        # ====================================================================================
+        # FE Layers
+        # ====================================================================================
+        layers = []
+        cur_dim, channels = min(self.state_dim[0], self.state_dim[1]), 1
+        assert cur_dim >= 3, "State dimensions must be at least 3x3"
+        while cur_dim >= 3:
+            if cur_dim == 3:
+                conv = nn.Conv2d(channels, self.hidden_dim, kernel_size=3, stride=1, padding=0)
+            else:
+                conv = nn.Conv2d(channels, self.hidden_dim, kernel_size=3, stride=2, padding=0)
+
+            torch.nn.init.kaiming_uniform_(conv.weight, mode="fan_out", nonlinearity="leaky_relu")
+            initialize_bias_conv(conv)
+            
+            if cur_dim == 3:
+                layer = nn.Sequential(
+                    conv,
+                    nn.LeakyReLU(negative_slope=0.01),
+                )
+            else:
+                layer = nn.Sequential(
+                    conv,
+                    nn.LeakyReLU(negative_slope=0.01),
+                    nn.BatchNorm2d(self.hidden_dim),
+                )
+
+            layers.append(layer)
+            channels = self.hidden_dim
+            cur_dim = conv_output_shape(cur_dim, kernel_size=3, stride=2, pad=0)
+
+        # ====================================================================================
+        # Output Layer
+        # ====================================================================================
+        layer = nn.Linear(self.hidden_dim+self.action_dim, 1)
+        torch.nn.init.kaiming_uniform_(layer.weight, mode="fan_out", nonlinearity="linear")
+        initialize_bias_linear(layer)
+        return nn.ModuleList(layers), layer
+
+    def forward_pass(self, state, layers):
+        if len(state.size()) == 2:
+            b,h,w = state.unsqueeze(0).size()
+        else:
+            b,h,w = state.size()
+        out = state.view(b, 1, h, w)
+
+        for layer in layers:
+            out = layer(out)
+        out = F.adaptive_avg_pool2d(out, output_size=(1,1)).view(b, -1)
+        return out
 
     def forward(self, state, action):
         # Concatenate state and action
-        x_q1 = torch.hstack((state.reshape(-1,self.state_dim[0]*self.state_dim[1]), action.reshape(-1,self.action_dim)))
-        x_q2 = torch.clone(x_q1)
-        
-        q1 = self.layers1(x_q1)
-        q2 = self.layers2(x_q2)
+        x_q1 = state
+        x_q2 = torch.clone(state)
+
+        q1 = self.forward_pass(x_q1, self.layers1)
+        q2 = self.forward_pass(x_q2, self.layers2)
+
+        q1 = torch.concatenate((q1, action), dim=1)
+        q2 = torch.concatenate((q2, action), dim=1)
+        q1 = self.output_layer1(q1)
+        q2 = self.output_layer2(q2)
         return q1, q2
-  
+
+
 class PolicyNetwork(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim):
         super(PolicyNetwork, self).__init__()
@@ -67,16 +127,56 @@ class PolicyNetwork(nn.Module):
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
 
-        self.layers = nn.Sequential(
-            nn.Linear(state_dim[0]*state_dim[1],hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim,hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim,action_dim)
-        )
+        # ====================================================================================
+        # FE Layers
+        # ====================================================================================
+        layers = []
+        cur_dim, channels = min(state_dim[0], state_dim[1]), 1
+        assert cur_dim >= 3, "State dimensions must be at least 3x3"
+        while cur_dim >= 3:
+            conv = nn.Conv2d(channels, hidden_dim, kernel_size=3, stride=1, padding=0)
+            torch.nn.init.kaiming_uniform_(conv.weight, mode="fan_out", nonlinearity="leaky_relu")
+            initialize_bias_conv(conv)
+
+            if cur_dim == 3:
+                layer = nn.Sequential(
+                    conv,
+                    nn.LeakyReLU(negative_slope=0.01),
+                )
+            else:
+                layer = nn.Sequential(
+                    conv,
+                    nn.LeakyReLU(negative_slope=0.01),
+                    nn.BatchNorm2d(self.hidden_dim),
+                )
+
+            layers.append(layer)
+            channels = hidden_dim
+            cur_dim = conv_output_shape(cur_dim, kernel_size=3, stride=1, pad=0)
+
+        self.layers = nn.ModuleList(layers)
+
+        # ====================================================================================
+        # Output Layer
+        # ====================================================================================
+        layer = nn.Linear(hidden_dim, action_dim)
+        torch.nn.init.kaiming_uniform_(layer.weight, mode="fan_out", nonlinearity="linear")
+        initialize_bias_linear(layer)
+        self.output_layer = layer
 
     def forward(self, state):
-        return self.layers(state.reshape(-1,self.state_dim[0]*self.state_dim[1]))
+        if len(state.size()) == 2:
+            b,h,w = state.unsqueeze(0).size()
+        else:
+            b,h,w = state.size()
+        out = state.view(b, 1, h, w)
+
+        for layer in self.layers:
+            out = layer(out)
+        out = F.adaptive_avg_pool2d(out, output_size=(1,1)).view(b, -1)
+        out = self.output_layer(out)
+        return out
+
 
 class AnnealedGumbelSoftmaxPolicy(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=256, init_temperature=1.0, min_temperature=0.1, anneal_rate=1e-5):
@@ -94,14 +194,15 @@ class AnnealedGumbelSoftmaxPolicy(nn.Module):
 
     def forward(self, state, temperature=None):
         logits = self.policy_net(state)
-        gumbel_probs = self.gumbel_softmax_sample(logits, temperature=temperature if temperature is not None else self.temperature)
+        gumbel_probs = self.gumbel_softmax_sample(logits,temperature=temperature if temperature is not None else self.temperature,)
         _, action = torch.max(gumbel_probs, dim=-1)
 
         # action = F.gumbel_softmax(logits, tau=temperature if temperature is not None else self.temperature, hard=True)
         return gumbel_probs, action
 
     def anneal_temperature(self):
-        self.temperature.data = torch.max(self.temperature * np.exp(-self.anneal_rate), torch.tensor(self.min_temperature))
+        self.temperature.data = torch.max(self.temperature * np.exp(-self.anneal_rate),torch.tensor(self.min_temperature))
+
 
 class ReplayBuffer:
     def __init__(self, max_size, full_maze):
@@ -125,19 +226,19 @@ class ReplayBuffer:
         indices = np.random.choice(len(self.buffer), batch_size, replace=False)
         states, actions, rewards, next_states, dones = zip(*[self.buffer[i] for i in indices])
 
-        states = torch.from_numpy(np.stack(states,axis=0))
+        states = torch.from_numpy(np.stack(states, axis=0))
         actions = torch.vstack(actions)
-        rewards = torch.FloatTensor(rewards).view(-1,1)
-        next_states = torch.from_numpy(np.stack(next_states,axis=0))
-        dones = torch.Tensor(dones).view(-1,1)
-        
+        rewards = torch.FloatTensor(rewards).view(-1, 1)
+        next_states = torch.from_numpy(np.stack(next_states, axis=0))
+        dones = torch.Tensor(dones).view(-1, 1)
+
         # Convert to PyTorch tensors
         if double:
             states = states.double()
             actions = actions.long()
             rewards = rewards.double()
             next_states = next_states.double()
-            dones = torch.Tensor(dones).view(-1,1)
+            dones = torch.Tensor(dones).view(-1, 1)
 
         states = states.to(device)
         actions = actions.to(device)
@@ -145,13 +246,15 @@ class ReplayBuffer:
         next_states = next_states.to(device)
         dones = dones.to(device)
         return states, actions, rewards, next_states, dones
-    
+
     def __len__(self):
         return len(self.buffer)
+
 
 def get_action(actor, state_tensor, action_low, action_high, temperature=None):
     probs, selected_action = actor(state_tensor, temperature)
     return probs, selected_action
+
 
 def update_critic(critic, target_critic, batch, gamma, critic_optimizer, target_actor, action_low, action_high, temperature=None):
     critic_optimizer.zero_grad()
@@ -178,6 +281,7 @@ def update_critic(critic, target_critic, batch, gamma, critic_optimizer, target_
     torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=2)
     critic_optimizer.step()
 
+
 def update_actor(actor, critic, actor_optimizer, replay_buffer, batch_size, double, device, action_low, action_high):
     actor_optimizer.zero_grad()
     state = replay_buffer.sample(batch_size, double, device)[0]
@@ -191,30 +295,41 @@ def update_actor(actor, critic, actor_optimizer, replay_buffer, batch_size, doub
     probs, _ = get_action(actor, state, action_low, action_high, temperature=1e-8)
 
     # Update the actor based on critics Q1 prediction
-    actor_loss = -critic(state, probs)[0].mean()    
+    actor_loss = -critic(state, probs)[0].mean()
     actor_loss.backward()
     torch.nn.utils.clip_grad_norm_(actor.parameters(), max_norm=2)
     actor_optimizer.step()
+
 
 def soft_update_target_network(model, target_model, tau):
     for param, target_param in zip(model.parameters(), target_model.parameters()):
         target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
+
 def initiate_experiment(args):
     if args.render:
-        env = RandomMaze(window_size=args.window_size, partial_view=not args.full_maze,\
-                       view_kernel_size=args.maze_view_kernel_size, render_mode="human")
+        env = RandomMaze(
+            window_size=args.window_size,
+            partial_view=not args.full_maze,
+            view_kernel_size=args.maze_view_kernel_size,
+            render_mode="human",
+        )
     else:
-        env = RandomMaze(window_size=args.window_size, partial_view=not args.full_maze,\
-                       view_kernel_size=args.maze_view_kernel_size) 
-    state, _ = env.reset(seed=args.fixed_seed) # Set seed
-    env.generate_maze(args.mazepath) # Generate maze & objects
-    args.state_dim = [state.shape[0],state.shape[1]]
+        env = RandomMaze(
+            window_size=args.window_size,
+            partial_view=not args.full_maze,
+            view_kernel_size=args.maze_view_kernel_size,
+        )
+    state, _ = env.reset(seed=args.fixed_seed)  # Set seed
+    env.generate_maze(args.mazepath)  # Generate maze & objects
+    args.state_dim = [state.shape[0], state.shape[1]]
 
-    actor = AnnealedGumbelSoftmaxPolicy(args.state_dim, args.action_dim, args.hidden_dim, args.init_temperature, args.min_exporation_temperature, args.temperature_anneal_rate)
-    critic = CriticNetwork(args.state_dim, args.action_dim)
-    target_actor = AnnealedGumbelSoftmaxPolicy(args.state_dim, args.action_dim, args.hidden_dim, args.init_temperature, args.min_exporation_temperature, args.temperature_anneal_rate)
-    target_critic = CriticNetwork(args.state_dim, args.action_dim)
+    actor = AnnealedGumbelSoftmaxPolicy(args.state_dim, args.action_dim, args.hidden_dim, args.init_temperature,\
+                                        args.min_exporation_temperature, args.temperature_anneal_rate)
+    critic = CriticNetwork(args.state_dim, args.action_dim, args.hidden_dim,)
+    target_actor = AnnealedGumbelSoftmaxPolicy(args.state_dim, args.action_dim, args.hidden_dim, args.init_temperature,\
+                                        args.min_exporation_temperature, args.temperature_anneal_rate)
+    target_critic = CriticNetwork(args.state_dim, args.action_dim, args.hidden_dim)
 
     if args.double:
         actor = actor.double()
@@ -236,14 +351,14 @@ def initiate_experiment(args):
 
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=args.actor_lr, weight_decay=args.weight_decay)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=args.critic_lr, weight_decay=args.weight_decay)
-    
+
     replay_buffer = ReplayBuffer(args.buffer_size, args.full_maze)
-    state = env.reset()[0] # Get initial state
+    state = env.reset()[0]  # Get initial state
     eval_avg_rewards_cache = []
- 
+
     # Main training loop
     for step in range(args.max_steps):
-        state_tensor = torch.from_numpy(state.astype(np.float32)).reshape(1,-1)
+        state_tensor = torch.from_numpy(state.astype(np.float32))
         if args.double:
             state_tensor = state_tensor.double()
         state_tensor = state_tensor.to(args.device)
@@ -253,14 +368,14 @@ def initiate_experiment(args):
             with torch.no_grad():
                 if args.double:
                     # action = torch.DoubleTensor(np.random.rand(low=args.action_low, high=args.action_high+1, size = (1,1))).to(args.device)
-                    action_probs = F.softmax(torch.rand(size=(1,args.action_dim)), dim=-1).double().to(args.device)
+                    action_probs = F.softmax(torch.rand(size=(1, args.action_dim)), dim=-1).double().to(args.device)
                 else:
                     # action = torch.FloatTensor(np.random.randint(low=args.action_low, high=args.action_high+1, size = (1,1))).to(args.device)
-                    action_probs = F.softmax(torch.rand(size=(1,args.action_dim)), dim=-1).float().to(args.device)
+                    action_probs = F.softmax(torch.rand(size=(1, args.action_dim)), dim=-1).float().to(args.device)
                 action = torch.argmax(action_probs, dim=-1).item()
-                next_state, reward, terminated, _, _  = env.step(action)
+                next_state, reward, terminated, _, _ = env.step(action)
                 replay_buffer.add(state, action_probs, reward, next_state, terminated)
-            
+
             if terminated:
                 state = env.reset()[0]
             else:
@@ -270,7 +385,7 @@ def initiate_experiment(args):
                 env.render()
 
             # Test the smallest value of policy temperature after annealing, ignoring its threshold.
-            rate = np.exp(-args.temperature_anneal_rate) ** (args.max_steps / args.temperature_anneal_step) 
+            rate = np.exp(-args.temperature_anneal_rate) ** (args.max_steps / args.temperature_anneal_step)
 
             # Anneal policy temperature
             if step % args.temperature_anneal_step == 0:
@@ -280,17 +395,15 @@ def initiate_experiment(args):
             # Off-Policy Exploration - add exploration noise to the action
             with torch.no_grad():
                 action_probs, action = get_action(actor, state_tensor, args.action_low, args.action_high)
-                next_state, reward, terminated, _, _  = env.step(action.item())
+                next_state, reward, terminated, _, _ = env.step(action.item())
                 replay_buffer.add(state, action_probs, reward, next_state, terminated)
 
             # Policy Smoothing - add policy noise to the action
             batch = replay_buffer.sample(args.batch_size, args.double, args.device)
-            update_critic(critic, target_critic, batch, args.gamma, critic_optimizer, target_actor,\
-                          args.action_low, args.action_high, args.policy_temperature)
+            update_critic(critic, target_critic, batch, args.gamma, critic_optimizer, target_actor, args.action_low, args.action_high, args.policy_temperature)
 
             if step % args.policy_freq == 0:
-                update_actor(actor, critic, actor_optimizer, replay_buffer, args.batch_size,\
-                             args.double, args.device, args.action_low, args.action_high)
+                update_actor(actor,critic,actor_optimizer,replay_buffer,args.batch_size,args.double,args.device,args.action_low,args.action_high)
                 soft_update_target_network(actor, target_actor, args.tau)
                 soft_update_target_network(critic, target_critic, args.tau)
 
@@ -307,28 +420,28 @@ def initiate_experiment(args):
                 while len(reward_cache) < args.episode_avg:
                     eval_state = env.reset()[0]
                     terminated, total_reward, eval_steps = False, 0, 0
-                                        
+
                     while terminated == False and eval_steps < args.eval_episode_max_step:
                         with torch.no_grad():
-                            eval_state_tensor = torch.from_numpy(eval_state.astype(np.float32)).reshape(1,-1)
+                            eval_state_tensor = torch.from_numpy(eval_state.astype(np.float32))
                             if args.double:
                                 eval_state_tensor = eval_state_tensor.double()
                             eval_state_tensor = eval_state_tensor.to(args.device)
-                            
+
                             # During evaluation, make the policy deterministic:
                             #   Setting temperature as close to 0 as possible, but not exactly 0 because that would cause the Gumbel-Softmax to crash
-                            #   Making the noise scaling zero. 
+                            #   Making the noise scaling zero.
                             _, action = get_action(actor, eval_state_tensor, args.action_low, args.action_high, temperature=1e-8)
-                            eval_state, reward, terminated, _, _  = env.step(int(action.item()))
+                            eval_state, reward, terminated, _, _ = env.step(int(action.item()))
                             total_reward += reward
                             eval_steps += 1
-                            
+
                     reward_cache.append(total_reward)
-            
+
                 avg_reward = sum(reward_cache) / float(len(reward_cache))
-                eval_avg_rewards_cache.append([int(step / args.eval_steps),avg_reward])
+                eval_avg_rewards_cache.append([int(step / args.eval_steps), avg_reward])
                 print(f"Step: {step:7d} -> Latest Eval Reward:{avg_reward: >8.3f}")
-        
+
                 if avg_reward > 10:
                     print(f"Task solved in {step:7d} steps.")
                     break
@@ -340,77 +453,77 @@ def initiate_experiment(args):
     fig = plt.figure(figsize=(20, 8))
     x = np.arange(len(steps))
     plt.xticks(ticks=x, labels=steps, rotation=90)
-    plt.plot(x, rewards, label='Rewards', color='red', linewidth=2, linestyle=':', marker='o')
-    plt.xlabel('Steps (x5000)')
-    plt.ylabel('Reward')
-    plt.title('Avg. Reward Throughout Training')
+    plt.plot(x, rewards, label="Rewards", color="red", linewidth=2, linestyle=":", marker="o")
+    plt.xlabel("Steps (x5000)")
+    plt.ylabel("Reward")
+    plt.title("Avg. Reward Throughout Training")
     plt.legend()
-    plt.tick_params(axis='x', which='major', labelsize=5)
-    plt.tick_params(axis='y', which='major', labelsize=10)
+    plt.tick_params(axis="x", which="major", labelsize=5)
+    plt.tick_params(axis="y", which="major", labelsize=10)
     plt.tight_layout()
     # plt.show()
 
-    with open(f'{args.writepath}.pkl', 'wb') as f:
+    with open(f"{args.writepath}.pkl", "wb") as f:
         pickle.dump({
-            "fig": fig,
-            "steps": steps,
-            "rewards": rewards,
-        }, f)
+                "fig": fig,
+                "steps": steps,
+                "rewards": rewards,
+            }, f)
 
     # Dump The Modelbuffer_size
     if args.dump:
-        torch.save({
-            'actor': actor.state_dict(),
-            'critic': critic.state_dict(),
-            'target_actor': target_actor.state_dict(),
-            'target_critic': target_critic.state_dict(),
-            'actor_optimizer': actor_optimizer.state_dict(),
-            'critic_optimizer': critic_optimizer.state_dict(),
-            'replay_buffer': replay_buffer,
-            'fixed_seed ': fixed_seed, 
-            'args': args,
-        }, f'{args.writepath}.pth')
+        torch.save(
+            {
+                "actor": actor.state_dict(),
+                "critic": critic.state_dict(),
+                "target_actor": target_actor.state_dict(),
+                "target_critic": target_critic.state_dict(),
+                "actor_optimizer": actor_optimizer.state_dict(),
+                "critic_optimizer": critic_optimizer.state_dict(),
+                "replay_buffer": replay_buffer,
+                "fixed_seed ": fixed_seed,
+                "args": args,
+            }, f"{args.writepath}.pth")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # TD3 Arguments
-    parser.add_argument('--gamma', type=float, default=0.99) # Future reward scaling (discount)
-    parser.add_argument('--tau', type=float, default=0.005) # Target update rate
-    parser.add_argument('--policy_freq', type=int, default=2)
-    parser.add_argument('--buffer_size', type=int, default=-1)
-    parser.add_argument('--batch_size', type=int, default=100)
-    parser.add_argument('--max_steps', type=int, default=1000000)
-    parser.add_argument('--eval_steps', type=int, default=10000)
-    parser.add_argument('--exploration_steps', type=int, default=10000)
-    parser.add_argument('--episode_avg', default=10, type=int)
-    parser.add_argument('--eval_episode_max_step', default=10000, type=int)
-    parser.add_argument('--actor_lr', type=float, default=1e-3)
-    parser.add_argument('--critic_lr', type=float, default=1e-3)
-    parser.add_argument('--hidden_dim', type=int, default=256)
-    parser.add_argument('--init_temperature', type=float, default=1.0)
-    parser.add_argument('--min_exporation_temperature', type=float, default=0.2)
-    parser.add_argument('--policy_temperature', type=float, default=0.1)
-    parser.add_argument('--temperature_anneal_rate', type=float, default=1.25e-5)
-    parser.add_argument('--temperature_anneal_step', type=float, default=1)
+    parser.add_argument("--gamma", type=float, default=0.99)  # Future reward scaling (discount)
+    parser.add_argument("--tau", type=float, default=0.005)  # Target update rate
+    parser.add_argument("--policy_freq", type=int, default=2)
+    parser.add_argument("--buffer_size", type=int, default=-1)
+    parser.add_argument("--batch_size", type=int, default=100)
+    parser.add_argument("--max_steps", type=int, default=1000000)
+    parser.add_argument("--eval_steps", type=int, default=10000)
+    parser.add_argument("--exploration_steps", type=int, default=10000)
+    parser.add_argument("--episode_avg", default=10, type=int)
+    parser.add_argument("--eval_episode_max_step", default=10000, type=int)
+    parser.add_argument("--actor_lr", type=float, default=1e-3)
+    parser.add_argument("--critic_lr", type=float, default=1e-3)
+    parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--init_temperature", type=float, default=1.0)
+    parser.add_argument("--min_exporation_temperature", type=float, default=0.2)
+    parser.add_argument("--policy_temperature", type=float, default=0.1)
+    parser.add_argument("--temperature_anneal_rate", type=float, default=1.25e-5)
+    parser.add_argument("--temperature_anneal_step", type=float, default=1)
 
     # Env Arguments
-    parser.add_argument('--window_size', default=256, type=int)
-    parser.add_argument('--full_maze', action='store_true')
-    parser.add_argument('--maze_view_kernel_size', default=1, type=int)
-    parser.add_argument('--mazepath', type=str, default='./mazes')
+    parser.add_argument("--window_size", default=256, type=int)
+    parser.add_argument("--full_maze", action="store_true")
+    parser.add_argument("--maze_view_kernel_size", default=1, type=int)
+    parser.add_argument("--mazepath", type=str, default="./mazes/width-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl")
 
     # Misc Arguments
-    parser.add_argument('--weight_decay', default=0, type=float)
-    parser.add_argument('--device', default=0, type=int)
-    parser.add_argument('--double', action='store_true')
-    parser.add_argument('--render', action='store_true')
-    parser.add_argument('--dump', action='store_true')
-    parser.add_argument('--rootname',\
-        default="".join(random.SystemRandom().choice(string.ascii_uppercase+string.ascii_lowercase+string.digits) for _ in range(8)),\
-        type=str, help="Name for experiment root folder. Defaults to length-8 random string.")
+    parser.add_argument("--weight_decay", default=1e-5, type=float)
+    parser.add_argument("--device", default=0, type=int)
+    parser.add_argument("--double", action="store_true")
+    parser.add_argument("--render", action="store_true")
+    parser.add_argument("--dump", action="store_true")
+    parser.add_argument("--rootname", type=str, help="Name for experiment root folder. Defaults to length-8 random string.",\
+                        default="".join(random.SystemRandom().choice(string.ascii_uppercase + string.ascii_lowercase + string.digits) for _ in range(8)))
     args = parser.parse_args()
 
-    args.device = f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu'
+    args.device = f"cuda:{args.device}" if torch.cuda.is_available() else "cpu"
     args.fixed_seed = fixed_seed
 
     settings = f"Configuration maze_solver_td3_{args.rootname} ->\n\
@@ -427,7 +540,7 @@ if __name__ == "__main__":
     args.action_low, args.action_high, args.action_dim = 0, 3, 4
     args.device = torch.device(args.device)
 
-    writepath = f'./experiments/td3/{args.mazepath.split("/")[-1].split(".pkl")[0].split("_")[-1]}/{args.rootname}'
+    writepath = f'./experiments/td3_conv/{args.mazepath.split("/")[-1].split(".pkl")[0].split("_")[-1]}/{args.rootname}'
     Path(writepath).mkdir(parents=True, exist_ok=True)
     args.writepath = writepath
 
@@ -475,21 +588,7 @@ if __name__ == "__main__":
             Exploration during Training:
                 The Gumbel-Softmax introduces stochasticity during training, allowing the model to explore different actions even when the policy indicates 
                     a strong preference for a particular action. This exploration is beneficial for learning a more robust policy.
-
-            Temperature Annealing:
-                The temperature parameter in Gumbel-Softmax can be annealed during training. Higher temperature values lead to more exploration, 
-                    while lower values make the sampling process approach the argmax operation. This annealing allows you to control the level of 
-                    exploration during different phases of training.
-
-        During Evaluation:
-            During evaluation, when you need a concrete action, you can still use argmax on the probabilities obtained from the Gumbel-Softmax. 
-            This allows you to make a deterministic decision based on the learned policy while still benefiting from the advantages mentioned above during training.
-
-    In essence, additive noise may be disconnected from the policy network, making the gradients nonsensical. This isn't the case for Gumbel-softmax.
-    
-    - Change exploration to randomly compute probabilities instead of a single action.
-    - Added a fixed policy_temperature and an annealed 'exploration_temperature', mimicing original TD3 behavior.
+-0.9_bbnYDPhsjerrENoS.pkl --dump --device 1 behavior.
     """
 
-    # python td3_gumbel_softmax.py --mazepath ./mazes/width-7_height-7_complexity-0.9_density-0.9_HaZkfFSrmPtakGDH.pkl
-    # python td3_gumbel_softmax.py --device 1 --dump --mazepath width-25_height-25_complexity-0.9_density-0.9_MtU6Wf2sgAp2Aq9m.pkl --maze_view_kernel_size
+    # python td3_gumbel_softmax_conv.py --mazepath ./mazes_51/width-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl --dump --device 1 --maze_view_kernel_size

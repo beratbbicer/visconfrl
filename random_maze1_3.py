@@ -4,11 +4,13 @@ import numpy as np
 import gymnasium as gym
 from collections import namedtuple
 from dataclasses import dataclass, field
+from pathlib import Path
+import random, string, pickle, os
 
 """
 TODO:
-    - Fix reward function:
-        Not even stable baselines can learn in this environment as it is
+    - Explore from a random location during explorations
+    - Simplify the maze
     - Cache maze view and _to_value() to speed up rendering
     - check out https://github.com/Farama-Foundation/Minigrid
     - Check if redundant observations are in replay buffer, consider deleting these
@@ -20,20 +22,22 @@ TODO:
     - reset uses seed, but confirmation required - especially when maze is being created
 
 Done:
-    1. Test the environment with random actions
-    2. reset uses seed, but confirmation required - especially when maze is being created
-    3. Increased termination reward so that if the goal is reached, it is likely to be positive always, negative otherwise.
+     1. Test the environment with random actions
+     2. reset uses seed, but confirmation required - especially when maze is being created
+     3. Increased termination reward so that if the goal is reached, it is likely to be positive always, negative otherwise.
         We might need to prune this so that the shortest path is incentivized.
-    4. Train TD3 on this environment with a simple agent
+     4. Train TD3 on this environment with a simple agent
         td3_adapted does this, performance to be determined
-    5. Render and partial maze view are now aligned. Transposing the partial view in step() fixed it.
+     5. Render and partial maze view are now aligned. Transposing the partial view in step() fixed it.
         Though I still don't understand why it was necessary.
-    6. Convert observations to be a local view on the maze, rather than the entire maze.
-    7. Changed reward so legal actions that reduce Manhattan dist bet. agent and target get a small positive reward
+     6. Convert observations to be a local view on the maze, rather than the entire maze.
+     7. Changed reward so legal actions that reduce Manhattan dist bet. agent and target get a small positive reward
         Otherwise, a small negative reward is given.
-    8. Played with reward function
+     8. Played with reward function
         Now reward scales with new Manhattan distance to goal / manhattan distance at start, max value
-    9. Fixed observation space
+     9. Fixed observation space
+    10. Current reward function seems appropriate at the moment: Inversely proportional to distance to goal.
+    11. Fix generated mazes
 """
 
 VonNeumannMotion = namedtuple('VonNeumannMotion', 
@@ -81,10 +85,7 @@ class RandomMaze(gym.Env):
         self.maze = np.zeros((self._height, self._width), dtype=int)
         self.motions = VonNeumannMotion()
 
-        self.observation_space = gym.spaces.Box(low=np.zeros((view_kernel_size*2+1,view_kernel_size*2+1)),\
-                                                high=3+np.zeros((view_kernel_size*2+1,view_kernel_size*2+1)),\
-                                                dtype=int)
-        self.action_space = gym.spaces.Discrete(len(self.motions))
+        self._init_input_spaces()
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
@@ -155,7 +156,22 @@ class RandomMaze(gym.Env):
 
         return Z.astype(int)
 
-    def generate_maze(self):
+    def _init_input_spaces(self):
+        self._view_kernel_size = min(self._view_kernel_size, self._width//2, self._height//2)
+        self._start_idx, self._goal_idx = [[1,1]], [[self._height-2, self._width-2]]
+        
+        if self._partial_view:
+            self.observation_space = gym.spaces.Box(low=np.zeros((self._view_kernel_size*2+1,self._view_kernel_size*2+1)),\
+                                                    high=3+np.zeros((self._view_kernel_size*2+1,self._view_kernel_size*2+1)),\
+                                                    dtype=int)
+        else:
+            self.observation_space = gym.spaces.Box(low=np.zeros((self._height,self._width)),\
+                                                    high=3+np.zeros((self._height,self._width)),\
+                                                    dtype=int)
+            
+        self.action_space = gym.spaces.Discrete(len(self.motions))
+
+    def generate_maze(self, savepath):
         r"""Generate a random maze.
 
         This is invoked to generate the maze and initialize maze objects.
@@ -165,8 +181,41 @@ class RandomMaze(gym.Env):
             ``0`` represents a free space, and ``1`` represents an obstacle.
 
         Maze objects are stored in ``self._objects``.
+
+        Args:
+        - :attr:`savepath` - path to save the maze to. 
+            If this path points to a file (pickle archive), the maze will be loaded from this path.
+            Class arguments will also be adjusted accordingly. See ``self._init_input_spaces()`` for details.
+            Otherwise, a new maze will be generated and dumped to this location.
         """
-        self.maze = self._random_maze()
+
+        if Path(savepath).exists() and Path(savepath).is_file():
+            savepath = str(Path(savepath).resolve())
+            fields = savepath.split(os.sep)[-1].split('.pkl')[0].split('_')
+            for field in fields:
+                if 'width' in field:
+                    self._width = int(field.split('-')[-1])
+                elif 'height' in field:
+                    self._height = int(field.split('-')[-1])
+                elif 'complexity' in field:
+                    self._complexity = float(field.split('-')[-1])
+                elif 'density' in field:
+                    self._density = float(field.split('-')[-1])
+                else:
+                    pass
+
+            self._init_input_spaces()
+
+            with open(savepath, 'rb') as f:
+                self.maze = pickle.load(f)
+        else:
+            name = "".join(random.SystemRandom().choice(string.ascii_uppercase+string.ascii_lowercase+string.digits) for _ in range(16))
+            name = f"width-{self._width}_height-{self._height}_complexity-{self._complexity}_density-{self._density}_{name}.pkl"
+            self.maze = self._random_maze()
+
+            with open(Path(savepath).joinpath(name), 'wb') as f:
+                pickle.dump(self.maze, f)
+
         objects = self._make_objects()
         self._objects = namedtuple('Objects', map(lambda x: x.name, objects), defaults=objects)()  
     
@@ -264,11 +313,11 @@ class RandomMaze(gym.Env):
         
         if self._is_goal(new_position):
             # reward = +10
-            reward = 1
+            reward = 10
             terminated = True
         elif not valid:
             # reward = -10
-            reward = -1
+            reward = -10
             terminated = True
         else:
             '''
@@ -331,7 +380,6 @@ class RandomMaze(gym.Env):
 
 if __name__ == "__main__":
     from gymnasium.envs.registration import register
-
     register(
         id="RandomMaze-v1.0",
         entry_point=RandomMaze,
@@ -351,19 +399,42 @@ if __name__ == "__main__":
     env = gymnasium.make('gym_examples/GridWorld-v0')
     """
 
-    env = gym.make("RandomMaze-v1.0", render_mode="human", partial_view=True, view_kernel_size=2)
-    test = env.reset() # Set seed
-    env.get_wrapper_attr('generate_maze')() # Generate maze & objects
-    state = env.reset()[0] # Get initial state
+    import shutil
+    try:
+        shutil.rmtree(Path('./mazes'))
+    except FileNotFoundError:
+        pass
+    
+    Path('./mazes').mkdir(exist_ok=True)
+    env = gym.make("RandomMaze-v1.0", render_mode="human", partial_view=True, view_kernel_size=2, width=51, height=51, complexity=0.9, density=0.9)
+    env.get_wrapper_attr('generate_maze')('./mazes')
+    env.get_wrapper_attr('generate_maze')('./mazes')
+    env.get_wrapper_attr('generate_maze')('./mazes')
+    env.close()
+    env = gym.make("RandomMaze-v1.0", render_mode="human", partial_view=False, view_kernel_size=2, width=25, height=25, complexity=0.9, density=0.9)
+    env.get_wrapper_attr('generate_maze')('./mazes')
+    env.get_wrapper_attr('generate_maze')('./mazes')
+    env.get_wrapper_attr('generate_maze')('./mazes')
+    env.close()
+    env = gym.make("RandomMaze-v1.0", render_mode="human", partial_view=False, view_kernel_size=2, width=7, height=7, complexity=0.9, density=0.9)
+    env.get_wrapper_attr('generate_maze')('./mazes')
+    env.get_wrapper_attr('generate_maze')('./mazes')
+    env.get_wrapper_attr('generate_maze')('./mazes')
 
-    for _ in range(100):
-        env.render()
-        action = env.action_space.sample()
-        print("Action taken:", action)
-        next_state, reward, terminated, truncated, info = env.step(action)
+    for path in Path('./mazes').glob('*.pkl'):
+        path = str(path.resolve())
+        env.get_wrapper_attr('generate_maze')(path)
 
-        if terminated or truncated:
-            print("Environment is reset")
-            next_state, info = env.reset()
-        state = next_state
+        state, _ = env.reset()
+        for _ in range(10):
+            env.render()
+            action = env.action_space.sample()
+            print("Action taken:", action)
+            next_state, reward, terminated, truncated, info = env.step(action)
+
+            if terminated or truncated:
+                print("Environment is reset")
+                next_state, info = env.reset()
+            state = next_state
+        # input("Press Enter to continue...")
     env.close()

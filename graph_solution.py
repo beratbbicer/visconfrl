@@ -166,44 +166,34 @@ class GraphSolution:
 if __name__ == "__main__":
     import time
     from gymnasium.envs.registration import register
+    from pathlib import Path
 
     register(
         id="RandomMaze-v1.0",
         entry_point=RandomMaze,
     )
 
-    # For exporting the environment to the gym registry
-    """
+    env = gym.make("RandomMaze-v1.0", render_mode="human", partial_view=False)
+    for path in Path('./mazes').glob('*.pkl'):
+        path = str(path.resolve())
+        env.get_wrapper_attr('generate_maze')(path)
+        env.reset()
+        t1 = time.time()
+        maze_solver = GraphSolution(env)
+        maze_solver.create_adj_list()
+        t2 = time.time()
+        actions = maze_solver.shortest_path_solution()
+        state = env.reset()[0]
 
-    setup(
-        name="gym_examples",
-        version="0.0.1",
-        install_requires=["gymnasium==0.26.0", "pygame==2.1.0"],
-    )
+        for action in actions:
+            env.render()
+            next_state, reward, terminated, truncated, info = env.step(action)
+            state = next_state
 
-    # Use it with this afterwards: 
-    import gym_examples
-    env = gymnasium.make('gym_examples/GridWorld-v0')
-    """
-    env = gym.make("RandomMaze-v1.0", render_mode="human", partial_view=False, view_kernel_size=2, width=101, height=101)
-    env.reset() # Set seed
-    env.get_wrapper_attr('generate_maze')() # Generate maze & objects
-    state = env.reset()[0] # Get initial state
-    t1 = time.time()
-    maze_solver = GraphSolution(env)
-    maze_solver.create_adj_list()
-    t2 = time.time()
-    actions = maze_solver.shortest_path_solution()
-    state = env.reset()[0]
-
-    for action in actions:
         env.render()
-        next_state, reward, terminated, truncated, info = env.step(action)
-        state = next_state
-
-    env.render()
-    t3 = time.time()
-    print("Time taken to find shortest path: {}s".format(t3-t2))
-    print("Time taken to find shortest path, including graph construction: {}s".format(t2-t1))
-    input('Press any key to exit.')
+        t3 = time.time()
+        print(path)
+        print("Time taken to find shortest path: {:.3f}s".format(t3-t2))
+        print("Time taken to find shortest path, including graph construction: {:.3f}s\n".format(t3-t1))
+        # input("Press Enter to continue...")    
     env.close()
