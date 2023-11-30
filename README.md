@@ -12,9 +12,9 @@ Authors: Berat Biçer, E.Batuhan Kaynak, Hamdi Dibeklioğlu
   - [ ] Collect papers related to affective signals and reinforcement learning.
   - [ ] Summarize findings for reference in the "Related Work" section.
   
-- [ ] **Tool Setup**
-  - [ ] Install PyTorch for deep learning tasks.
-  - [ ] Set up gym environment for maze simulations.
+- [x] **Tool Setup**
+  - [x] Install PyTorch for deep learning tasks.
+  - [x] Set up gym environment for maze simulations.
 
 ### Data Collection
 - [ ] **Video Data**
@@ -25,18 +25,18 @@ Authors: Berat Biçer, E.Batuhan Kaynak, Hamdi Dibeklioğlu
   - [ ] Extract patient labels via speech and link them to perceived the grids.
 
 ### Environment Simulation
-- [ ] **Maze Design**
-  - [ ] Create multiple 8x8 grid mazes.
-  - [ ] Ensure each maze has a solvable path.
+- [x] **Maze Design**
+  - [x] Create multiple 8x8 grid mazes.
+  - [x] Ensure each maze has a solvable path.
   
-- [ ] **Grid Views**
-  - [ ] Generate random 3x3 subregions from mazes as grid views.
+- [x] **Grid Views**
+  - [x] Generate random 3x3 subregions from mazes as grid views.
   
 ### Model Training
 - [ ] **Reinforcement Learning Agent**
-  - [ ] Train agent without human intervention as a control.
-    - [ ] Using the whole 8x8 maze.
-    - [ ] Using the restricted 3x3 grid.
+  - [x] Train agent without human intervention as a control.
+    - [x] Using the whole 8x8 maze.
+    - [x] Using the restricted 3x3 grid.
   - [ ] Train agent with human-provided suggested actions.
     - [ ] Include this information from the start.
     - [ ] Include this information at a later stage. (Extra)

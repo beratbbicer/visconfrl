@@ -378,6 +378,40 @@ class RandomMaze(gym.Env):
             pygame.display.quit()
             pygame.quit()
 
+    def _sample_random_position(self):
+        while True:
+            position = (np.random.randint(0, self.maze.shape[0]), np.random.randint(0, self.maze.shape[1]))
+            if self._is_valid(position):
+                break
+        return position
+
+    def get_random_observation(self):
+        r"""Generate a random observation from a non-obstructed location.
+
+        This is used to generate observations for the replay buffer, to address the problem of termination bias: 
+        The agent cannot explore the entire space, because it frequently terminates when it hits an obstacle.
+        This is a severe problem that occurs during the initial stages, and whether it persists afterwards is yet to be determined.
+
+        Note that the agent is first moved to the random location, and then moved back to its previous position.
+        Consider this if there's a need to use this function for other purposes or for debugging.
+            
+        Returns:
+        - :attr:`state` - the observation.
+        - :attr:`action_logits` - random logits for the action space, sampled uniformly from [0,1] range.
+        - :attr:`reward` - the reward received for the action.
+        - :attr:`next_state` - the next observation.
+        - :attr:`terminated` - whether the episode is terminated.
+        """
+        prev_agent_position = self._objects.agent.positions[0]
+        new_position = self._sample_random_position()
+        self._objects.agent.positions = [new_position]
+        state, _ = self._get_partial_view(self._to_value())
+        action_logits = np.random.rand(1,4)
+        action = np.argmax(action_logits)
+        next_state, reward, terminated, _, _ = self.step(action)
+        self._objects.agent.positions = [prev_agent_position]
+        return state, action_logits, reward, next_state, terminated
+
 if __name__ == "__main__":
     from gymnasium.envs.registration import register
     register(
@@ -399,6 +433,7 @@ if __name__ == "__main__":
     env = gymnasium.make('gym_examples/GridWorld-v0')
     """
 
+    '''
     import shutil
     try:
         shutil.rmtree(Path('./mazes'))
@@ -420,10 +455,11 @@ if __name__ == "__main__":
     env.get_wrapper_attr('generate_maze')('./mazes')
     env.get_wrapper_attr('generate_maze')('./mazes')
     env.get_wrapper_attr('generate_maze')('./mazes')
-
+    '''
+    env = RandomMaze(render_mode="human", partial_view=False, view_kernel_size=1)
     for path in Path('./mazes').glob('*.pkl'):
         path = str(path.resolve())
-        env.get_wrapper_attr('generate_maze')(path)
+        env.generate_maze(path)
 
         state, _ = env.reset()
         for _ in range(10):
