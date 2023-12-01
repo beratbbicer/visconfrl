@@ -134,13 +134,12 @@ def collate_fn(batch):
     rewards = torch.from_numpy(np.stack(rewards, axis=0)).float()
     return views, rewards
 
-@staticmethod
 def load_model(path):
     checkpoint = torch.load(path, map_location=torch.device('cpu'))
     model = BaseModel(checkpoint['args'].state_dim, checkpoint['args'].action_dim, checkpoint['args'].hidden_dim, checkpoint['args'].numlayers)
-    if checkpoint['args'].double:
-        model = model.double()
-    model = model.to(checkpoint['args'].device)
+    # if checkpoint['args'].double:
+    #     model = model.double()
+    # model = model.to(checkpoint['args'].device)
     model.load_state_dict(checkpoint['model'])
     model.eval()
     return model, checkpoint
