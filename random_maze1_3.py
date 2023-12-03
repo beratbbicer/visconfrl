@@ -318,11 +318,11 @@ class RandomMaze(gym.Env):
         
         if self._is_goal(new_position):
             # reward = +10
-            reward = 1000
+            reward = 1
             terminated = True
         elif not valid: 
             # reward = -10
-            reward = -1000
+            reward = -1
             terminated = True
         else:
             '''
@@ -337,7 +337,7 @@ class RandomMaze(gym.Env):
             
             # reward = -0.001
             # reward = 1 - self._get_distance_to_goal(new_position) / self._get_distance_to_goal(self._start_idx[0])
-            reward = self._get_reward(self._objects.goal.positions[0], self._start_idx[0], new_position)
+            reward = self._get_reward(self._objects.goal.positions[0], self._start_idx[0], new_position) * 1e-3
             terminated = False
 
         maze = self._to_value()
