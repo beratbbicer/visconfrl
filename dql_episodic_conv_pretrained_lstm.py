@@ -304,7 +304,6 @@ def initiate_experiment(args):
                 print(f"Task solved in {episode:4d} episodes.")
                 break
             
-
     env.close()
 
     # Save plots
@@ -342,21 +341,20 @@ def initiate_experiment(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weightspath', default='./download/pretrain/2_101_101_0.9_0.9_13000_600_split/lNY48Pwj/e60.pth', type=str, help='Path to pretrained weights.')
+    parser.add_argument('--weightspath', default='./download/pretrain/2_101_101_0.9_0.9_13000_600_split/Ag58NjWa/e99.pth', type=str, help='Path to pretrained weights.')
     parser.add_argument('--unfreeze_critic', action='store_true')
     parser.add_argument('--unfreeze_policy', action='store_true')
     
     # TD3 Arguments
-    parser.add_argument('--gamma', type=float, default=0.99) # Future reward scaling (discount)
-    parser.add_argument('--tau', type=float, default=1.0) # Target update rate
-    parser.add_argument('--buffer_size', type=int, default=10000)
+    parser.add_argument('--gamma', type=float, default=0.95) # Future reward scaling (discount)
+    parser.add_argument('--buffer_size', type=int, default=20000)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--max_steps', type=int, default=1000000)
-    parser.add_argument('--eval_steps', type=int, default=5000)
-    parser.add_argument('--eval_start', default=10000, type=int)
+    parser.add_argument('--eval_steps', type=int, default=100)
+    parser.add_argument('--eval_start', default=1000, type=int)
     parser.add_argument('--episode_avg', default=10, type=int)
-    parser.add_argument('--eval_episode_max_step', default=10000, type=int)
-    parser.add_argument('--lr', type=float, default=2e-3)
+    parser.add_argument('--eval_episode_max_step', default=1000, type=int)
+    parser.add_argument('--lr', type=float, default=2e-4)
 
     # DQL Arguments
     parser.add_argument('--epsilon', type=float, default=0.5)
@@ -366,7 +364,7 @@ if __name__ == "__main__":
 
     # Env Arguments
     parser.add_argument('--window_size', default=256, type=int)
-    parser.add_argument("--mazepath", type=str, default="./mazes/width-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl")
+    parser.add_argument("--mazepath", type=str, default="./mazes/width-7_height-7_complexity-0.9_density-0.9_HaZkfFSrmPtakGDH.pkl")
 
     parser.add_argument('--full_maze', action='store_true')
     parser.add_argument('--maze_view_kernel_size', default=1, type=int)
@@ -386,10 +384,9 @@ if __name__ == "__main__":
     args.maze_view_kernel_size = 2
 
     settings = f"Configuration {args.rootname} ->\n\
-        gamma:{args.gamma}, tau:{args.tau}\n\
-        buffer_size:{args.buffer_size}, batch_size:{args.batch_size}\n\
-        max_steps:{args.max_steps}, eval_steps:{args.eval_steps}, device:{args.device}, double:{args.double}, lr:{args.lr}\n\
-        episode_avg:{args.episode_avg}, render:{args.render}, dump:{args.dump}, eval_start:{args.eval_start}, epsilon_step:{args.epsilon_step}\n\
+        gamma:{args.gamma}, buffer_size:{args.buffer_size}, batch_size:{args.batch_size}, max_steps:{args.max_steps},\n\
+        eval_steps:{args.eval_steps}, device:{args.device}, double:{args.double}, lr:{args.lr}, episode_avg:{args.episode_avg}\n\
+        render:{args.render}, dump:{args.dump}, eval_start:{args.eval_start}, epsilon_step:{args.epsilon_step}\n\
         eval_episode_max_step:{args.eval_episode_max_step}, epsilon_decay:{args.epsilon_decay}, epsilon_min:{args.epsilon_min}, epsilon: {args.epsilon}\n\n\
         window_size:{args.window_size}, full_maze:{args.full_maze}, maze_view_kernel_size:{args.maze_view_kernel_size}, weight_decay:{args.weight_decay}\n"
     print(settings)
@@ -400,7 +397,8 @@ if __name__ == "__main__":
     writepath = f'./experiments/dql_conv_pretrained_lstm/{args.mazepath.split("/")[-1].split(".pkl")[0].split("_")[-1]}/{args.rootname}'
     Path(writepath).mkdir(parents=True, exist_ok=True)
     args.writepath = writepath
-
+    
+    # args.render, args.dump = True, True
     initiate_experiment(args)
 
     """ 
