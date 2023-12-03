@@ -165,35 +165,31 @@ class GraphSolution:
 
 if __name__ == "__main__":
     import time
-    from gymnasium.envs.registration import register
     from pathlib import Path
-
-    register(
-        id="RandomMaze-v1.0",
-        entry_point=RandomMaze,
-    )
-
-    env = gym.make("RandomMaze-v1.0", render_mode="human", partial_view=False)
-    for path in Path('./mazes').glob('*.pkl'):
+    env = RandomMaze(render_mode='human')
+    for path in Path('./mazes_25').glob('*.pkl'):
         path = str(path.resolve())
-        env.get_wrapper_attr('generate_maze')(path)
+        env.generate_maze(path)
         env.reset()
         t1 = time.time()
         maze_solver = GraphSolution(env)
         maze_solver.create_adj_list()
         t2 = time.time()
-        actions = maze_solver.shortest_path_solution()
+        actions = maze_solver.max_flow_solution()
         state = env.reset()[0]
+        cum_reward = 0
 
         for action in actions:
             env.render()
             next_state, reward, terminated, truncated, info = env.step(action)
             state = next_state
+            cum_reward+=reward
 
         env.render()
         t3 = time.time()
         print(path)
+        print("Cumulative reward: {}".format(cum_reward))
         print("Time taken to find shortest path: {:.3f}s".format(t3-t2))
         print("Time taken to find shortest path, including graph construction: {:.3f}s\n".format(t3-t1))
-        # input("Press Enter to continue...")    
+        input("Press Enter to continue...")    
     env.close()

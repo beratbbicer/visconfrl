@@ -318,11 +318,11 @@ class RandomMaze(gym.Env):
         
         if self._is_goal(new_position):
             # reward = +10
-            reward = 10
+            reward = 1000
             terminated = True
-        elif not valid:
+        elif not valid: 
             # reward = -10
-            reward = -10
+            reward = -1000
             terminated = True
         else:
             '''
@@ -344,7 +344,7 @@ class RandomMaze(gym.Env):
 
         if self._partial_view:
             state, dist = self._get_partial_view(maze, self._objects.goal.positions[0], self._objects.agent.positions[0], self._width, self._height, self._view_kernel_size)
-            return state.T, reward, terminated, False, {"distance": dist}
+            return state, reward, terminated, False, {"distance": dist}
         else:
             return maze, reward, terminated, False, {}
 
@@ -420,7 +420,7 @@ class RandomMaze(gym.Env):
         self._objects.agent.positions = [prev_agent_position]
         return state, action_logits, reward, next_state, terminated
 
-    def get_grid_view_collection(self, view_kernel_size=2, width=101, height=101, complexity=0.9, density=0.9, target=1000000, maze_count=100):
+    def get_grid_view_collection(self, view_kernel_size=2, width=101, height=101, complexity=0.9, density=0.9, target=15000, maze_count=500):
         r"""Generate a collection of grid views and regression targets for each action, for each position.
         
         Args:
@@ -437,8 +437,8 @@ class RandomMaze(gym.Env):
         - :attr:`mazes` - a list of mazes used to generate the views. Dumpped to save the overhead spent on generating the mazes.
         """
         views, mazes, count = {}, [], 0
-        for i in range(maze_count):
-            print(f'Maze {i+1:7d}/{maze_count:7d}, views: {count:7d}/{target:7d}')
+        for maze_idx in range(maze_count):
+            print(f'Maze {maze_idx:7d}/{maze_count-1:7d}, views: {count:7d}/{target:7d}')
             if count >= target:
                 break
 
@@ -454,11 +454,29 @@ class RandomMaze(gym.Env):
                     state, _ = self._get_partial_view(maze, (goal_position), (i,j), width, height, view_kernel_size)
                     state[state == 2] = 0
                     state[view_kernel_size, view_kernel_size] = 2 # Place the agent in the center of the view
-                    rewards = [1 if self._is_valid(maze, (i+self.motions[action][0], j+self.motions[action][1]), True) else 0 for action in range(len(self.motions))]
+                    # state = state.T
+
+                    rewards = []
+                    for action in range(len(self.motions)):
+                        new_position = (i+self.motions[action][0], j+self.motions[action][1])
+                        maze_value, state_value = maze[new_position[0], new_position[1]], state[view_kernel_size + self.motions[action][0], view_kernel_size + self.motions[action][1]]
+                        if self._is_valid(maze, new_position, True):
+                            rewards.append(1)
+                        else:
+                            rewards.append(0)
+                    
+                    # rewards = [1 if self._is_valid(maze, (i+self.motions[action][0], j+self.motions[action][1]), True) else 0 for action in range(len(self.motions))]
                     # rewards = F.softmax(torch.FloatTensor(rewards).view(1,-1), dim=-1).numpy().reshape(-1)
                     rewards = np.asarray(rewards) / np.sum(rewards)
-
                     key = state.tobytes()
+
+                    '''
+                    if key in dummy:
+                        values = dummy[key]
+                        if (values[0]==state).all() and not (values[1]==rewards).all():
+                            _ = 1
+                    '''
+
                     if key in views:
                         continue
 
@@ -524,12 +542,13 @@ if __name__ == "__main__":
     except FileNotFoundError:
         pass
     
-    Path('./mazes').mkdir(exist_ok=True)
-    env = gym.make("RandomMaze-v1.0", render_mode="human", partial_view=True, view_kernel_size=2, width=51, height=51, complexity=0.9, density=0.9)
-    env.get_wrapper_attr('generate_maze')('./mazes')
-    env.get_wrapper_attr('generate_maze')('./mazes')
-    env.get_wrapper_attr('generate_maze')('./mazes')
+    Path('./mazes_101').mkdir(exist_ok=True)
+    env = env = RandomMaze(render_mode="human", partial_view=True, view_kernel_size=2, width=101, height=101, complexity=0.9, density=0.9)
+    env.get_wrapper_attr('generate_maze')('./mazes_101')
+    env.get_wrapper_attr('generate_maze')('./mazes_101')
+    env.get_wrapper_attr('generate_maze')('./mazes_101')
     env.close()
+    
     env = gym.make("RandomMaze-v1.0", render_mode="human", partial_view=False, view_kernel_size=2, width=25, height=25, complexity=0.9, density=0.9)
     env.get_wrapper_attr('generate_maze')('./mazes')
     env.get_wrapper_attr('generate_maze')('./mazes')
@@ -570,14 +589,15 @@ if __name__ == "__main__":
     height=101
     complexity=0.9
     density=0.9
-    target=1000000
-    maze_count=1000
+    target=13000
+    maze_count=600
 
     Path('./grid_views/').mkdir(parents=True, exist_ok=True)
     filepath = f'./grid_views/{view_kernel_size}_{width}_{height}_{complexity}_{density}_{target}_{maze_count}.pkl'
     
     if Path(filepath).exists() == False:
         views, mazes = env.get_grid_view_collection(view_kernel_size, width, height, complexity, density, target, maze_count)
+
         with open(f'./grid_views/{view_kernel_size}_{width}_{height}_{complexity}_{density}_{target}_{maze_count}.pkl', 'wb') as f:
             pickle.dump({
                 'views': views,

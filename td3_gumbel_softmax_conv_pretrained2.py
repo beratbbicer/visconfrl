@@ -21,19 +21,13 @@ import matplotlib.pyplot as plt
 import pickle
 import glob
 from random_maze1_3 import RandomMaze
-from replay_buffer import ReplayBuffer, populate_with_random_observation
+from pretrain import load_model
+from joblib import Parallel, delayed
 
 import warnings
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
-
-def initialize_bias_conv(layer):
-    if layer.bias is not None:
-        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
-        if fan_in != 0:
-            bound = 1 / math.sqrt(fan_in)
-            nn.init.uniform_(layer.bias, -bound, bound)
 
 def initialize_bias_linear(layer):
     if layer.bias is not None:
@@ -41,76 +35,84 @@ def initialize_bias_linear(layer):
         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
         nn.init.uniform_(layer.bias, -bound, bound)
 
-def conv_output_shape(x, kernel_size=1, stride=1, pad=0, dilation=1):
-    return math.floor(((x + (2 * pad) - (dilation * (kernel_size - 1)) - 1) / stride) + 1)
-
 class CriticNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim):
+    def __init__(self, action_dim, path, freeze=True):
         super(CriticNetwork, self).__init__()
-        self.state_dim = state_dim
         self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
-
-        self.layers1, self.output_layer1 = self.get_layers()
-        self.layers2, self.output_layer2 = self.get_layers()
-
-    def get_layers(self):
-        # ====================================================================================
-        # FE Layers
-        # ====================================================================================
-        layers = []
-        cur_dim, channels = min(self.state_dim[0], self.state_dim[1]), 1
-        assert cur_dim >= 3, "State dimensions must be at least 3x3"
-        while cur_dim >= 3:
-            if cur_dim == 3:
-                conv = nn.Conv2d(channels, self.hidden_dim, kernel_size=3, stride=1, padding=0)
-            else:
-                conv = nn.Conv2d(channels, self.hidden_dim, kernel_size=3, stride=2, padding=0)
-
-            torch.nn.init.kaiming_uniform_(conv.weight, mode="fan_out", nonlinearity="leaky_relu")
-            initialize_bias_conv(conv)
-            
-            if cur_dim == 3:
-                layer = nn.Sequential(
-                    conv,
-                    nn.LeakyReLU(negative_slope=0.01),
-                )
-            else:
-                layer = nn.Sequential(
-                    conv,
-                    nn.LeakyReLU(negative_slope=0.01),
-                    nn.BatchNorm2d(self.hidden_dim),
-                )
-
-            layers.append(layer)
-            channels = self.hidden_dim
-            cur_dim = conv_output_shape(cur_dim, kernel_size=3, stride=2, pad=0)
+        self.freeze = freeze
 
         # ====================================================================================
-        # Output Layer
+        # Pretrained FE Layers 1
         # ====================================================================================
-        layer = nn.Linear(self.hidden_dim+self.action_dim, 1)
-        torch.nn.init.kaiming_uniform_(layer.weight, mode="fan_out", nonlinearity="linear")
-        initialize_bias_linear(layer)
-        return nn.ModuleList(layers), layer
+        model, _ = load_model(path)
+        self.state_dim = model.state_dim
+        self.layers1 = model.layers
+        self.hidden_dim = model.hidden_dim
+        if freeze:
+            for param in self.layers1.parameters():
+                param.requires_grad = False
+        # ====================================================================================
+        # Pretrained FE Layers 2
+        # ====================================================================================
+        model, _ = load_model(path)
+        self.layers2 = model.layers
+        if freeze:
+            for param in self.layers2.parameters():
+                param.requires_grad = False
+        # ====================================================================================
+        # Output Layers
+        # ====================================================================================
+        self.output_layer1 = nn.Sequential(
+            nn.Linear(self.hidden_dim + self.action_dim, self.hidden_dim),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Linear(self.hidden_dim, 1)
+        )
+
+        self.output_layer2 = nn.Sequential(
+            nn.Linear(self.hidden_dim + self.action_dim, self.hidden_dim),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Linear(self.hidden_dim, 1)
+        )
 
     def forward_pass(self, state, layers):
         if len(state.size()) == 2:
             b,h,w = state.unsqueeze(0).size()
-        else:
+        elif len(state.size()) == 3:
             b,h,w = state.size()
+        else:
+            b,_,h,w = state.size()
         out = state.view(b, 1, h, w)
 
         for layer in layers:
             out = layer(out)
         out = F.adaptive_avg_pool2d(out, output_size=(1,1)).view(b, -1)
         return out
+    
+    def forward_pass_old(self, state, action, layers, output_layer):
+        if len(state.size()) == 2:
+            b,h,w = state.unsqueeze(0).size()
+        elif len(state.size()) == 3:
+            b,h,w = state.size()
+        else:
+            b,_,h,w = state.size()
+        out = state.view(b, 1, h, w)
+
+        for layer in layers:
+            out = layer(out)
+        out = F.adaptive_avg_pool2d(out, output_size=(1,1)).view(b, -1)
+        out = torch.concatenate((out, action), dim=1)
+        out = output_layer(out)
+        return out
 
     def forward(self, state, action):
         # Concatenate state and action
         x_q1 = state
         x_q2 = torch.clone(state)
-
+        
         q1 = self.forward_pass(x_q1, self.layers1)
         q2 = self.forward_pass(x_q2, self.layers2)
 
@@ -119,70 +121,78 @@ class CriticNetwork(nn.Module):
         q1 = self.output_layer1(q1)
         q2 = self.output_layer2(q2)
         return q1, q2
+    
+    def forward_old(self, state, action):
+        x_q1 = state
+        x_q2 = torch.clone(state)
 
+        q1, q2 = Parallel(n_jobs=2)(delayed(self.forward_pass)(x, action, layers, output_layer)\
+                                        for (x,layers,output_layer)\
+                                        in zip([x_q1,x_q2],[self.layers1,self.layers2],[self.output_layer1,self.output_layer2]))
+        return q1, q2
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim):
+    def __init__(self, action_dim, path, freeze=True):
         super(PolicyNetwork, self).__init__()
-        self.state_dim = state_dim
         self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
 
         # ====================================================================================
-        # FE Layers
+        # Pretrained FE Layers
         # ====================================================================================
-        layers = []
-        cur_dim, channels = min(state_dim[0], state_dim[1]), 1
-        assert cur_dim >= 3, "State dimensions must be at least 3x3"
-        while cur_dim >= 3:
-            conv = nn.Conv2d(channels, hidden_dim, kernel_size=3, stride=1, padding=0)
-            torch.nn.init.kaiming_uniform_(conv.weight, mode="fan_out", nonlinearity="leaky_relu")
-            initialize_bias_conv(conv)
+        model, checkpoint = load_model(path)
+        self.state_dim = model.state_dim
+        self.hidden_dim = model.hidden_dim
+        self.backbone = model
+        for param in self.backbone.parameters():
+            param.requires_grad = False
 
-            if cur_dim == 3:
-                layer = nn.Sequential(
-                    conv,
-                    nn.LeakyReLU(negative_slope=0.01),
-                )
-            else:
-                layer = nn.Sequential(
-                    conv,
-                    nn.LeakyReLU(negative_slope=0.01),
-                    nn.BatchNorm2d(self.hidden_dim),
-                )
-
-            layers.append(layer)
-            channels = hidden_dim
-            cur_dim = conv_output_shape(cur_dim, kernel_size=3, stride=1, pad=0)
-
-        self.layers = nn.ModuleList(layers)
-
+        model, checkpoint = load_model(path)
+        self.layers = model.layers
+        if freeze:
+            for param in self.layers.parameters():
+                param.requires_grad = False
         # ====================================================================================
         # Output Layer
         # ====================================================================================
-        layer = nn.Linear(hidden_dim, action_dim)
+        '''
+        layer = nn.Linear(self.hidden_dim, action_dim)
         torch.nn.init.kaiming_uniform_(layer.weight, mode="fan_out", nonlinearity="linear")
         initialize_bias_linear(layer)
         self.output_layer = layer
+        '''
+        linear = nn.Linear(self.hidden_dim, self.action_dim)
+        torch.nn.init.kaiming_uniform_(linear.weight, mode="fan_out", nonlinearity="tanh")
+        initialize_bias_linear(linear)
+
+        self.output_layer = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.LeakyReLU(negative_slope=0.01),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.LeakyReLU(negative_slope=0.01),
+            linear
+        )
 
     def forward(self, state):
         if len(state.size()) == 2:
             b,h,w = state.unsqueeze(0).size()
-        else:
+        elif len(state.size()) == 3:
             b,h,w = state.size()
-        out = state.view(b, 1, h, w)
+        else:
+            b,_,h,w = state.size()
+
+        out1 = state.view(b, 1, h, w)
+        out2 = self.backbone(out1)
 
         for layer in self.layers:
-            out = layer(out)
-        out = F.adaptive_avg_pool2d(out, output_size=(1,1)).view(b, -1)
-        out = self.output_layer(out)
-        return out
-
+            out1 = layer(out1)
+        out1 = F.adaptive_avg_pool2d(out1, output_size=(1,1)).view(b, -1)
+        out1 = torch.tanh(self.output_layer(out1))
+        return out1 + out2
 
 class AnnealedGumbelSoftmaxPolicy(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim=256, init_temperature=1.0, min_temperature=0.1, anneal_rate=1e-5):
+    def __init__(self, action_dim, weightspath, freeze, init_temperature=1.0, min_temperature=0.1, anneal_rate=1e-5):
         super(AnnealedGumbelSoftmaxPolicy, self).__init__()
-        self.policy_net = PolicyNetwork(state_dim, action_dim, hidden_dim)
+        self.policy_net = PolicyNetwork(action_dim, weightspath, freeze)
         self.temperature = nn.Parameter(torch.ones(1) * init_temperature)
         self.min_temperature = min_temperature
         self.anneal_rate = anneal_rate
@@ -195,7 +205,7 @@ class AnnealedGumbelSoftmaxPolicy(nn.Module):
 
     def forward(self, state, temperature=None):
         logits = self.policy_net(state)
-        gumbel_probs = self.gumbel_softmax_sample(logits,temperature=temperature if temperature is not None else self.temperature,)
+        gumbel_probs = self.gumbel_softmax_sample(logits,temperature=temperature if temperature is not None else self.temperature)
         _, action = torch.max(gumbel_probs, dim=-1)
 
         # action = F.gumbel_softmax(logits, tau=temperature if temperature is not None else self.temperature, hard=True)
@@ -203,6 +213,52 @@ class AnnealedGumbelSoftmaxPolicy(nn.Module):
 
     def anneal_temperature(self):
         self.temperature.data = torch.max(self.temperature * np.exp(-self.anneal_rate),torch.tensor(self.min_temperature))
+
+class ReplayBuffer:
+    def __init__(self, max_size, full_maze):
+        if max_size <= 0:
+            self.max_size = math.inf
+        else:
+            self.max_size = max_size
+
+        self.full_maze = full_maze
+        self.buffer = []
+
+    def add(self, state, action, reward, next_state, done):
+        experience = (state, action, reward, next_state, done)
+        if len(self.buffer) < self.max_size:
+            self.buffer.append(experience)
+        else:
+            self.buffer.pop(0)
+            self.buffer.append(experience)
+
+    def sample(self, batch_size, double, device):
+        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
+        states, actions, rewards, next_states, dones = zip(*[self.buffer[i] for i in indices])
+
+        states = torch.from_numpy(np.stack(states, axis=0))
+        actions = torch.vstack(actions)
+        rewards = torch.FloatTensor(rewards).view(-1, 1)
+        next_states = torch.from_numpy(np.stack(next_states, axis=0))
+        dones = torch.Tensor(dones).view(-1, 1)
+
+        # Convert to PyTorch tensors
+        if double:
+            states = states.double()
+            actions = actions.long()
+            rewards = rewards.double()
+            next_states = next_states.double()
+            dones = torch.Tensor(dones).view(-1, 1)
+
+        states = states.to(device)
+        actions = actions.to(device)
+        rewards = rewards.to(device)
+        next_states = next_states.to(device)
+        dones = dones.to(device)
+        return states, actions, rewards, next_states, dones
+
+    def __len__(self):
+        return len(self.buffer)
 
 
 def get_action(actor, state_tensor, action_low, action_high, temperature=None):
@@ -215,7 +271,7 @@ def update_critic(critic, target_critic, batch, gamma, critic_optimizer, target_
     state_batch, action_batch, reward_batch, next_state_batch, done_batch = batch
 
     if args.double:
-        state_batch = state_batch.double()()
+        state_batch = state_batch.double()
         next_state_batch = next_state_batch.double()
     else:
         state_batch = state_batch.float()
@@ -259,6 +315,7 @@ def soft_update_target_network(model, target_model, tau):
     for param, target_param in zip(model.parameters(), target_model.parameters()):
         target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
+
 def initiate_experiment(args):
     if args.render:
         env = RandomMaze(
@@ -273,17 +330,16 @@ def initiate_experiment(args):
             partial_view=not args.full_maze,
             view_kernel_size=args.maze_view_kernel_size,
         )
-
     state, _ = env.reset(seed=args.fixed_seed)  # Set seed
     env.generate_maze(args.mazepath)  # Generate maze & objects
     args.state_dim = [state.shape[0], state.shape[1]]
 
-    actor = AnnealedGumbelSoftmaxPolicy(args.state_dim, args.action_dim, args.hidden_dim, args.init_temperature,\
+    actor = AnnealedGumbelSoftmaxPolicy(args.action_dim, args.weightspath, not args.unfreeze_policy, args.init_temperature,\
                                         args.min_exporation_temperature, args.temperature_anneal_rate)
-    critic = CriticNetwork(args.state_dim, args.action_dim, args.hidden_dim,)
-    target_actor = AnnealedGumbelSoftmaxPolicy(args.state_dim, args.action_dim, args.hidden_dim, args.init_temperature,\
+    critic = CriticNetwork(args.action_dim, args.weightspath, not args.unfreeze_critic)
+    target_actor = AnnealedGumbelSoftmaxPolicy(args.action_dim, args.weightspath, not args.unfreeze_policy, args.init_temperature,\
                                         args.min_exporation_temperature, args.temperature_anneal_rate)
-    target_critic = CriticNetwork(args.state_dim, args.action_dim, args.hidden_dim)
+    target_critic = CriticNetwork(args.action_dim, args.weightspath, not args.unfreeze_critic)
 
     if args.double:
         actor = actor.double()
@@ -306,7 +362,7 @@ def initiate_experiment(args):
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=args.actor_lr, weight_decay=args.weight_decay)
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=args.critic_lr, weight_decay=args.weight_decay)
 
-    replay_buffer = ReplayBuffer()
+    replay_buffer = ReplayBuffer(args.buffer_size, args.full_maze)
     state = env.reset()[0]  # Get initial state
     eval_avg_rewards_cache = []
 
@@ -328,16 +384,15 @@ def initiate_experiment(args):
                     action_probs = F.softmax(torch.rand(size=(1, args.action_dim)), dim=-1).float().to(args.device)
                 action = torch.argmax(action_probs, dim=-1).item()
                 next_state, reward, terminated, _, _ = env.step(action)
-                flag = replay_buffer.add(state, action_probs, reward, next_state, terminated)
-
-                if flag == False:
-                    populate_with_random_observation(args, env, replay_buffer)
+                replay_buffer.add(state, action_probs, reward, next_state, terminated)
 
             if terminated:
                 state = env.reset()[0]
             else:
                 state = next_state
-        else:
+        elif step == args.exploration_steps:
+            state = env.reset()[0]
+        else:                
             if args.render:
                 env.render()
 
@@ -351,12 +406,12 @@ def initiate_experiment(args):
 
             # Off-Policy Exploration - add exploration noise to the action
             with torch.no_grad():
+                actor.eval()
                 action_probs, action = get_action(actor, state_tensor, args.action_low, args.action_high)
                 next_state, reward, terminated, _, _ = env.step(action.item())
-                flag = replay_buffer.add(state, action_probs, reward, next_state, terminated)
-
-                if flag == False:
-                    populate_with_random_observation(args, env, replay_buffer, tries=1)
+                next_state = next_state
+                replay_buffer.add(state, action_probs, reward, next_state, terminated)
+                actor.train()
 
             # Policy Smoothing - add policy noise to the action
             batch = replay_buffer.sample(args.batch_size, args.double, args.device)
@@ -376,7 +431,7 @@ def initiate_experiment(args):
             # Validation
             if step % args.eval_steps == 0:
                 reward_cache = []
-
+                actor.eval()
                 while len(reward_cache) < args.episode_avg:
                     eval_state = env.reset()[0]
                     terminated, total_reward, eval_steps = False, 0, 0
@@ -392,12 +447,15 @@ def initiate_experiment(args):
                             #   Setting temperature as close to 0 as possible, but not exactly 0 because that would cause the Gumbel-Softmax to crash
                             #   Making the noise scaling zero.
                             _, action = get_action(actor, eval_state_tensor, args.action_low, args.action_high, temperature=1e-8)
-                            eval_state, reward, terminated, _, _ = env.step(int(action.item()))
+                            eval_next_state, reward, terminated, _, _ = env.step(int(action.item()))
+                            eval_next_state = eval_next_state
+                            eval_state = eval_next_state
                             total_reward += reward
                             eval_steps += 1
 
                     reward_cache.append(total_reward)
 
+                actor.train()
                 avg_reward = sum(reward_cache) / float(len(reward_cache))
                 eval_avg_rewards_cache.append([int(step / args.eval_steps), avg_reward])
                 print(f"Step: {step:7d} -> Latest Eval Reward:{avg_reward: >8.3f}")
@@ -447,30 +505,32 @@ def initiate_experiment(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument('--weightspath', default='download/pretrain/2_101_101_0.9_0.9_13000_600_split/lNY48Pwj/e60.pth', type=str, help='Path to pretrained weights.')
+    parser.add_argument('--unfreeze_critic', action='store_true')
+    parser.add_argument('--unfreeze_policy', action='store_true')
+
     # TD3 Arguments
     parser.add_argument("--gamma", type=float, default=0.99)  # Future reward scaling (discount)
     parser.add_argument("--tau", type=float, default=0.005)  # Target update rate
     parser.add_argument("--policy_freq", type=int, default=2)
     parser.add_argument("--buffer_size", type=int, default=-1)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--max_steps", type=int, default=1000000)
-    parser.add_argument("--eval_steps", type=int, default=10000)
+    parser.add_argument("--eval_steps", type=int, default=5000)
     parser.add_argument("--exploration_steps", type=int, default=10000)
     parser.add_argument("--episode_avg", default=10, type=int)
-    parser.add_argument("--eval_episode_max_step", default=10000, type=int)
-    parser.add_argument("--actor_lr", type=float, default=1e-3)
-    parser.add_argument("--critic_lr", type=float, default=1e-3)
-    parser.add_argument("--hidden_dim", type=int, default=256)
-    parser.add_argument("--init_temperature", type=float, default=1.0)
+    parser.add_argument("--eval_episode_max_step", default=100, type=int)
+    parser.add_argument("--actor_lr", type=float, default=1e-4)
+    parser.add_argument("--critic_lr", type=float, default=1e-4)
+    parser.add_argument("--init_temperature", type=float, default=1)
     parser.add_argument("--min_exporation_temperature", type=float, default=0.2)
     parser.add_argument("--policy_temperature", type=float, default=0.1)
-    parser.add_argument("--temperature_anneal_rate", type=float, default=1.25e-5)
+    parser.add_argument("--temperature_anneal_rate", type=float, default=2e-5)
     parser.add_argument("--temperature_anneal_step", type=float, default=1)
 
     # Env Arguments
     parser.add_argument("--window_size", default=256, type=int)
     parser.add_argument("--full_maze", action="store_true")
-    parser.add_argument("--maze_view_kernel_size", default=1, type=int)
     parser.add_argument("--mazepath", type=str, default="./mazes_51/width-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl")
 
     # Misc Arguments
@@ -485,14 +545,15 @@ if __name__ == "__main__":
 
     args.device = f"cuda:{args.device}" if torch.cuda.is_available() else "cpu"
     args.fixed_seed = fixed_seed
+    args.maze_view_kernel_size = 2
 
-    settings = f"Configuration maze_solver_td3_{args.rootname} ->\n\
+    settings = f"Configuration {args.rootname} ->\n\
         gamma:{args.gamma}, tau:{args.tau}, policy_freq:{args.policy_freq}, buffer_size:{args.buffer_size}, batch_size:{args.batch_size}\n\
         max_steps:{args.max_steps}, eval_steps:{args.eval_steps}, device:{args.device}, double:{args.double}, actor_lr:{args.actor_lr}\n\
         critic_lr:{args.critic_lr}, episode_avg:{args.episode_avg}, render:{args.render}, dump:{args.dump}, weight_decay:{args.weight_decay}\n\
-        exploration_steps:{args.exploration_steps}, eval_episode_max_step:{args.eval_episode_max_step}, hidden_dim:{args.hidden_dim}\n\
+        exploration_steps:{args.exploration_steps}, eval_episode_max_step:{args.eval_episode_max_step}\n\
         init_temperature:{args.init_temperature}, min_exporation_temperature:{args.min_exporation_temperature}, policy_temperature:{args.policy_temperature}\n\
-        anneal_rate:{args.temperature_anneal_rate}, anneal_step:{args.temperature_anneal_step}\n\n\
+        anneal_rate:{args.temperature_anneal_rate}, anneal_step:{args.temperature_anneal_step}, unfreeze_critic:{args.unfreeze_critic}, unfreeze_policy:{args.unfreeze_policy}\n\n\
         window_size:{args.window_size}, full_maze:{args.full_maze}, maze_view_kernel_size:{args.maze_view_kernel_size}\n\
         mazepath:{args.mazepath}\n"
     print(settings)
@@ -500,19 +561,20 @@ if __name__ == "__main__":
     args.action_low, args.action_high, args.action_dim = 0, 3, 4
     args.device = torch.device(args.device)
 
-    writepath = f'./experiments/td3_conv_randexp/{args.mazepath.split("/")[-1].split(".pkl")[0].split("_")[-1]}/{args.rootname}'
+    writepath = f'./experiments/td3_conv_pretrained2/{args.mazepath.split("/")[-1].split(".pkl")[0].split("_")[-1]}/{args.rootname}'
     Path(writepath).mkdir(parents=True, exist_ok=True)
     args.writepath = writepath
 
     initiate_experiment(args)
 
     """ 
-    Exploration continues until batch_size > buffer_size or until a max step is reached. 
-    During exploration, if a new entry is not added to the buffer, a random observation is added instead.
-    
-    - Consider exploring bidirectionally: one from the start, one from the goal
+    In policy, use pretrained model in two ways: First, get its action predictions. Then, train policy based on its features.
+        The output is the sum of two action predictions: one from the pretrained model, and one from the policy based on the pretrained model.
+
+    In critic, no need to change anything yet. Will investigate later.
 
     # ====================================================================================
+    
     Adapting TD3 to for discrete action spaces using Gumbel-Softmax:
     - Change the actor to output raw logits
     - Use Gumbel-Softmax to sample actions from the logits
@@ -556,4 +618,4 @@ if __name__ == "__main__":
                     a strong preference for a particular action. This exploration is beneficial for learning a more robust policy.
     """
 
-    # python td3_gumbel_softmax_conv.py --mazepath ./mazes_51/doubleql_episodic_conv.pywidth-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl --dump --device 1 --maze_view_kernel_size
+    # python td3_gumbel_softmax_conv.py --mazepath ./mazes_51/width-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl --dump --device 1 --maze_view_kernel_size

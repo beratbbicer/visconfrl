@@ -20,7 +20,7 @@ from pathlib import Path
 import math
 import matplotlib.pyplot as plt
 import pickle
-
+from joblib import Parallel, delayed
 from random_maze1_3 import RandomMaze
 from pretrain import load_model
 
@@ -78,7 +78,7 @@ class CriticNetwork(nn.Module):
             nn.Linear(self.hidden_dim, 1)
         )
 
-    def forward_pass(self, state, layers):
+    def forward_pass_old(self, state, layers):
         if len(state.size()) == 2:
             b,h,w = state.unsqueeze(0).size()
         else:
@@ -89,8 +89,22 @@ class CriticNetwork(nn.Module):
             out = layer(out)
         out = F.adaptive_avg_pool2d(out, output_size=(1,1)).view(b, -1)
         return out
+    
+    def forward_pass(self, state, action, layers, output_layer):
+        if len(state.size()) == 2:
+            b,h,w = state.unsqueeze(0).size()
+        else:
+            b,h,w = state.size()
+        out = state.view(b, 1, h, w)
 
-    def forward(self, state, action):
+        for layer in layers:
+            out = layer(out)
+        out = F.adaptive_avg_pool2d(out, output_size=(1,1)).view(b, -1)
+        out = torch.concatenate((out, action), dim=1)
+        out = output_layer(out)
+        return out
+
+    def forward_old(self, state, action):
         # Concatenate state and action
         x_q1 = state
         x_q2 = torch.clone(state)
@@ -102,6 +116,15 @@ class CriticNetwork(nn.Module):
         q2 = torch.concatenate((q2, action), dim=1)
         q1 = self.output_layer1(q1)
         q2 = self.output_layer2(q2)
+        return q1, q2
+    
+    def forward(self, state, action):
+        x_q1 = state
+        x_q2 = torch.clone(state)
+
+        q1, q2 = Parallel(n_jobs=2)(delayed(self.forward_pass)(x, action, layers, output_layer)\
+                                        for (x,layers,output_layer)\
+                                        in zip([x_q1,x_q2],[self.layers1,self.layers2],[self.output_layer1,self.output_layer2]))
         return q1, q2
 
 class PolicyNetwork(nn.Module):
@@ -410,10 +433,10 @@ if __name__ == "__main__":
     parser.add_argument('--buffer_size', type=int, default=-1)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--max_steps', type=int, default=100000)
-    parser.add_argument('--eval_steps', type=int, default=1000)
-    parser.add_argument('--eval_start', default=1000, type=int)
+    parser.add_argument('--eval_steps', type=int, default=100)
+    parser.add_argument('--eval_start', default=500, type=int)
     parser.add_argument('--episode_avg', default=10, type=int)
-    parser.add_argument('--eval_episode_max_step', default=1000, type=int)
+    parser.add_argument('--eval_episode_max_step', default=100, type=int)
     parser.add_argument('--actor_lr', type=float, default=1e-4)
     parser.add_argument('--critic_lr', type=float, default=1e-4)
 
@@ -427,7 +450,7 @@ if __name__ == "__main__":
     parser.add_argument('--window_size', default=256, type=int)
     parser.add_argument('--full_maze', action='store_true')
     # parser.add_argument('--maze_view_kernel_size', default=2, type=int)
-    parser.add_argument('--mazepath', type=str, default='./mazes/width-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl')
+    parser.add_argument('--mazepath', type=str, default='./mazes_51/width-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl')
 
     # Misc Arguments
     parser.add_argument('--weight_decay', default=1e-5, type=float)

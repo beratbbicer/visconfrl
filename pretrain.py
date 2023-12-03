@@ -90,8 +90,10 @@ class BaseModel(nn.Module):
     def forward(self, state):
         if len(state.size()) == 2:
             b,h,w = state.unsqueeze(0).size()
-        else:
+        elif len(state.size()) == 3:
             b,h,w = state.size()
+        else:
+            b,_,h,w = state.size()
         out = state.view(b, 1, h, w)
 
         for layer in self.layers:
@@ -276,7 +278,7 @@ def initialize_experiment(args, settings):
 
 def initialize_pretrain():
     parser = argparse.ArgumentParser(description='RL Agent pretraining.', formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('--gridpath', default='./grid_views/2_101_101_0.9_0.9_1000000_1000_split.pkl', type=str, help='Path to grid views .pkl archive.')
+    parser.add_argument('--gridpath', default='./grid_views/2_101_101_0.9_0.9_13000_600_split.pkl', type=str, help='Path to grid views .pkl archive.')
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--numlayers", type=int, default=8)
     parser.add_argument("--lr", type=float, default=4e-4)
@@ -318,7 +320,7 @@ if __name__ == "__main__":
     '''
     # =============================================================
     '''
-    train_ds, val_ds, test_ds = split_data('./grid_views/2_101_101_0.9_0.9_1000000_1000.pkl', './grid_views/2_101_101_0.9_0.9_1000000_1000_split.pkl')
+    train_ds, val_ds, test_ds = split_data('./grid_views/2_101_101_0.9_0.9_13000_600.pkl', './grid_views/2_101_101_0.9_0.9_13000_600_split.pkl')
     train_dl, val_dl, test_dl = DataLoader(train_ds, batch_size=256, shuffle=True, collate_fn=collate_fn),\
                                 DataLoader(val_ds, batch_size=256, shuffle=True, collate_fn=collate_fn),\
                                 DataLoader(test_ds, batch_size=256, shuffle=True, collate_fn=collate_fn)
