@@ -505,7 +505,7 @@ def initiate_experiment(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weightspath', default='download/pretrain/2_101_101_0.9_0.9_13000_600_split/lNY48Pwj/e60.pth', type=str, help='Path to pretrained weights.')
+    parser.add_argument('--weightspath', default='./download/pretrain/2_101_101_0.9_0.9_13000_600_split/Ag58NjWa/e99.pth', type=str, help='Path to pretrained weights.')
     parser.add_argument('--unfreeze_critic', action='store_true')
     parser.add_argument('--unfreeze_policy', action='store_true')
 
@@ -531,7 +531,7 @@ if __name__ == "__main__":
     # Env Arguments
     parser.add_argument("--window_size", default=256, type=int)
     parser.add_argument("--full_maze", action="store_true")
-    parser.add_argument("--mazepath", type=str, default="./mazes_51/width-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl")
+    parser.add_argument("--mazepath", type=str, default="./mazes/width-51_height-51_complexity-0.9_density-0.9_bbnYDPhsjerrENoS.pkl")
 
     # Misc Arguments
     parser.add_argument("--weight_decay", default=1e-5, type=float)
