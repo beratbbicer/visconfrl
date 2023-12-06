@@ -19,7 +19,7 @@ from pathlib import Path
 import math
 import matplotlib.pyplot as plt
 import pickle
-from pretrain import load_model
+import pretrain
 from random_maze1_3 import RandomMaze
 
 import warnings
@@ -31,11 +31,12 @@ class QNetwork(nn.Module):
     def __init__(self, action_dim, path, freeze=True):
         super(QNetwork, self).__init__()
         self.action_dim = action_dim
+        self.freeze = freeze
 
         # ====================================================================================
         # Pretrained FE Layers
         # ====================================================================================
-        model, checkpoint = load_model(path)
+        model, checkpoint = pretrain.load_model(path)
         self.state_dim = model.state_dim
         self.hidden_dim = model.hidden_dim
         self.backbone = model
@@ -52,7 +53,9 @@ class QNetwork(nn.Module):
         # ====================================================================================
         # Output Layer
         # ====================================================================================
-        self.output_layer = model.output_layer
+        linear = nn.Linear(self.hidden_dim, self.action_dim)
+        nn.init.kaiming_uniform_(linear.weight, nonlinearity='linear')
+        self.output_layer = linear
 
     def initialize_lstm_states(self, batch_size, device, tensor_type):
         num_directions = 2 if self.rnn.bidirectional else 1
@@ -101,7 +104,7 @@ class QNetwork(nn.Module):
         out, (h0_out, c0_out) = self.rnn(out, (h0, c0))
         # ================================================================
         # Output Layer
-        out = F.softmax(self.output_layer(out.view(b,-1)))
+        out = self.output_layer(out.view(b,-1))
         return out, h0_out, c0_out
 
 class ReplayBuffer:
@@ -162,7 +165,42 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-def initiate_experiment(args):
+def evaluate(q_network, env, episode_avg, device, eval_episode_max_step, double, render=False):
+    reward_cache = []
+    while len(reward_cache) < episode_avg:
+        eval_state = env.reset()[0]
+        if double:
+            hs_eval, cs_eval = q_network.initialize_lstm_states(1, device, torch.DoubleTensor)
+        else:
+            hs_eval, cs_eval = q_network.initialize_lstm_states(1, device, torch.FloatTensor)
+
+        terminated, total_reward, eval_steps = False, 0, 0
+                            
+        while terminated == False and eval_steps < eval_episode_max_step:
+            with torch.no_grad():
+                if render:
+                    env.render()
+
+                eval_state_tensor = torch.from_numpy(eval_state.astype(np.float32))
+                if double:
+                    eval_state_tensor = eval_state_tensor.double()
+                eval_state_tensor = eval_state_tensor.to(device)
+
+                q_values_eval, hs_eval, cs_eval = q_network(eval_state_tensor, hs_eval, cs_eval)
+                action = torch.argmax(q_values_eval)
+                eval_state, reward, terminated, _, _  = env.step(action.item())
+                total_reward += reward
+                eval_steps += 1
+
+        if render:
+            env.render()  
+
+        reward_cache.append(total_reward)
+
+    avg_reward = sum(reward_cache) / float(len(reward_cache))
+    return avg_reward
+
+def run_experiment(args):
     if args.render:
         env = RandomMaze(
             window_size=args.window_size,
@@ -228,7 +266,7 @@ def initiate_experiment(args):
                 q_value_logits, hs_out, cs_out = q_network(state_tensor, hs, cs)
                 q_values = q_value_logits + torch.rand_like(q_value_logits) * epsilon
                 action = torch.argmax(q_values)
-                next_state, reward, terminated, _, _  = env.step(action)
+                next_state, reward, terminated, _, _  = env.step(action.item())
                 replay_buffer.add(state, q_values, reward, next_state, terminated, hs, cs, hs_out, cs_out)
                 state, hs, cs = next_state, hs_out, cs_out
                 q_network.train()
@@ -256,7 +294,7 @@ def initiate_experiment(args):
             q_values, _, _ = q_network(state_batch, h0_batch, c0_batch)
             loss = F.l1_loss(q_values, target_q_values)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=2)
+            torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=4)
             optimizer.step()
 
             for param, target_param in zip(q_network.parameters(), target_q_network.parameters()):
@@ -269,36 +307,11 @@ def initiate_experiment(args):
         # Validation
         if episode > args.eval_start and episode % args.eval_steps == 0:
             q_network.eval()
-            reward_cache = []
-
-            while len(reward_cache) < args.episode_avg:
-                eval_state = env.reset()[0]
-                if args.double:
-                    hs_eval, cs_eval = q_network.initialize_lstm_states(1, args.device, torch.DoubleTensor)
-                else:
-                    hs_eval, cs_eval = q_network.initialize_lstm_states(1, args.device, torch.FloatTensor)
-
-                terminated, total_reward, eval_steps = False, 0, 0
-                                    
-                while terminated == False and eval_steps < args.eval_episode_max_step:
-                    with torch.no_grad():
-                        eval_state_tensor = torch.from_numpy(eval_state.astype(np.float32))
-                        if args.double:
-                            eval_state_tensor = eval_state_tensor.double()
-                        eval_state_tensor = eval_state_tensor.to(args.device)
-
-                        q_values_eval, hs_eval, cs_eval = q_network(eval_state_tensor, hs_eval, cs_eval)
-                        action = torch.argmax(q_values_eval)
-                        eval_state, reward, terminated, _, _  = env.step(action)
-                        total_reward += reward
-                        eval_steps += 1
-                        
-                reward_cache.append(total_reward)
-
+            avg_reward = evaluate(q_network, env, args.episode_avg, args.device, args.eval_episode_max_step, args.double, args.render)
             q_network.train()
-            avg_reward = sum(reward_cache) / float(len(reward_cache))
-            eval_avg_rewards_cache.append([int(episode / args.eval_steps),avg_reward])
-            print(f"Episode: {episode:4d} -> Latest Eval Reward:{avg_reward: >7.3f}")
+
+            eval_avg_rewards_cache.append([episode // args.eval_steps, avg_reward])
+            print(f"Episode: {episode:4d} -> Latest Eval Reward:{avg_reward: >7.4f}")
 
             if avg_reward >= 1:
                 print(f"Task solved in {episode:4d} episodes.")
@@ -321,7 +334,7 @@ def initiate_experiment(args):
     plt.tight_layout()
     # plt.show()
 
-    with open(f'{args.writepath}.pkl', 'wb') as f:
+    with open(f'{args.writepath}/figure.pkl', 'wb') as f:
         pickle.dump({
             "fig": fig,
             "steps": steps,
@@ -337,9 +350,9 @@ def initiate_experiment(args):
             'replay_buffer': replay_buffer,
             'fixed_seed ': fixed_seed, 
             'args': args,
-        }, f'{args.writepath}.pth')
+        }, f'{args.writepath}/weights.pth')
 
-if __name__ == "__main__":
+def initialize_experiment():
     parser = argparse.ArgumentParser()
     parser.add_argument('--weightspath', default='./download/pretrain/2_101_101_0.9_0.9_13000_600_split/Ag58NjWa/e99.pth', type=str, help='Path to pretrained weights.')
     parser.add_argument('--unfreeze_critic', action='store_true')
@@ -347,14 +360,14 @@ if __name__ == "__main__":
     
     # TD3 Arguments
     parser.add_argument('--gamma', type=float, default=0.95) # Future reward scaling (discount)
-    parser.add_argument('--buffer_size', type=int, default=20000)
+    parser.add_argument('--buffer_size', type=int, default=50000)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--max_steps', type=int, default=1000000)
+    parser.add_argument('--max_steps', type=int, default=10000000)
     parser.add_argument('--eval_steps', type=int, default=100)
     parser.add_argument('--eval_start', default=1000, type=int)
     parser.add_argument('--episode_avg', default=10, type=int)
     parser.add_argument('--eval_episode_max_step', default=1000, type=int)
-    parser.add_argument('--lr', type=float, default=2e-4)
+    parser.add_argument('--lr', type=float, default=1e-3)
 
     # DQL Arguments
     parser.add_argument('--epsilon', type=float, default=0.5)
@@ -364,7 +377,7 @@ if __name__ == "__main__":
 
     # Env Arguments
     parser.add_argument('--window_size', default=256, type=int)
-    parser.add_argument("--mazepath", type=str, default="./mazes/width-7_height-7_complexity-0.9_density-0.9_HaZkfFSrmPtakGDH.pkl")
+    parser.add_argument("--mazepath", type=str, default="./mazes_7/width-7_height-7_complexity-0.9_density-0.9_HaZkfFSrmPtakGDH.pkl")
 
     parser.add_argument('--full_maze', action='store_true')
     parser.add_argument('--maze_view_kernel_size', default=1, type=int)
@@ -395,11 +408,12 @@ if __name__ == "__main__":
     args.device = torch.device(args.device)
 
     writepath = f'./experiments/dql_conv_pretrained_lstm/{args.mazepath.split("/")[-1].split(".pkl")[0].split("_")[-1]}/{args.rootname}'
+    # writepath = f'./experiments/dummy/{args.mazepath.split("/")[-1].split(".pkl")[0].split("_")[-1]}/{args.rootname}'
     Path(writepath).mkdir(parents=True, exist_ok=True)
     args.writepath = writepath
     
-    # args.render, args.dump = True, True
-    initiate_experiment(args)
+    args.render, args.dump = False, True
+    run_experiment(args)
 
     """ 
     Optional partial maze view setting.
@@ -408,3 +422,39 @@ if __name__ == "__main__":
     
     Render occurs post pure-exploration only
     """
+
+def load_model(path, device):
+    checkpoint = torch.load(path)
+    q_network = QNetwork(checkpoint['args'].action_dim, checkpoint['args'].weightspath, not checkpoint['args'].unfreeze_policy)
+    q_network.load_state_dict(checkpoint['q_network'])
+    q_network = q_network.to(device)
+    q_network.eval()
+    return q_network, checkpoint
+
+def evaluate_agent():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--weightspath', default='./experiments/dql_conv_pretrained_lstm/HaZkfFSrmPtakGDH/8ZQ5LpxO/weights.pth', type=str, help='Path to pretrained weights.')
+    parser.add_argument('--window_size', default=256, type=int)
+    parser.add_argument("--eval_episodes", type=int, default=100)
+    parser.add_argument('--eval_episode_max_step', default=1000, type=int)
+    parser.add_argument('--device', default=0, type=int)
+    args = parser.parse_args()
+    args.device = torch.device(args.device)
+    
+    q_network, checkpoint = load_model(args.weightspath, args.device)
+    # q_network = q_network.float().to("cpu")
+
+    env = RandomMaze(window_size=args.window_size, partial_view=not checkpoint['args'].full_maze,\
+                     view_kernel_size=checkpoint['args'].maze_view_kernel_size, render_mode="human")
+
+    state, _ = env.reset(seed=checkpoint['args'].fixed_seed)  # Set seed
+    env.generate_maze(checkpoint['args'].mazepath)  # Generate maze & objects
+    
+    q_network.eval()
+    avg_reward = evaluate(q_network, env, args.eval_episodes, args.device, args.eval_episode_max_step, False, True)
+    q_network.train()
+    print(f"Avg Reward:{avg_reward: >7.4f}")         
+
+if __name__ == "__main__":
+    initialize_experiment()
+    # evaluate_agent()
