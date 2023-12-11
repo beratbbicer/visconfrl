@@ -551,7 +551,7 @@ def run_experiment(args):
     plt.tight_layout()
     # plt.show()
 
-    with open(f"{args.writepath}.pkl", "wb") as f:
+    with open(f"{args.writepath}/figure.pkl", "wb") as f:
         pickle.dump({
                 "fig": fig,
                 "steps": steps,
@@ -571,7 +571,7 @@ def run_experiment(args):
                 "replay_buffer": replay_buffer,
                 "fixed_seed ": fixed_seed,
                 "args": args,
-            }, f"{args.writepath}.pth")
+            }, f"{args.writepath}/weights.pth")
 
 def initialize_experiment():
     parser = argparse.ArgumentParser()

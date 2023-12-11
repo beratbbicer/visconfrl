@@ -461,7 +461,7 @@ def initialize_experiment():
     run_experiment(args)
 
 def load_model(path, device):
-    checkpoint = torch.load(path)
+    checkpoint = torch.load(path, map_location=device)
     q_network = QNetwork(checkpoint['args'].action_dim, checkpoint['args'].weightspath, not checkpoint['args'].unfreeze_policy)
     q_network.load_state_dict(checkpoint['q_network'])
     q_network = q_network.to(device)
@@ -470,7 +470,7 @@ def load_model(path, device):
 
 def evaluate_agent():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weightspath', default='./experiments/dql_conv_pretrained_lstm/HaZkfFSrmPtakGDH/8ZQ5LpxO/weights.pth', type=str, help='Path to pretrained weights.')
+    parser.add_argument('--weightspath', default='./experiments/dql_conv_pretrained_lstm/MtU6Wf2sgAp2Aq9m/47lBiPfa/weights.pth', type=str, help='Path to pretrained weights.')
     parser.add_argument('--window_size', default=256, type=int)
     parser.add_argument("--eval_episodes", type=int, default=100)
     parser.add_argument('--eval_episode_max_step', default=1000, type=int)

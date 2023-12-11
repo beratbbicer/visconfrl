@@ -513,6 +513,44 @@ class RandomMaze(gym.Env):
 
         return views, mazes            
 
+    def get_experiment_grid_view(self, view_kernel_size=2, enlarged_kernel_size=5, limit=10, maze_count=25, width=101, height=101, complexity=0.9, density=0.9):
+        states, counts = [], {}
+        for maze_idx in range(maze_count):
+            print(f'Maze {maze_idx:7d}/{maze_count-1:7d}')
+            maze = self._random_maze(width, height, complexity, density)
+            goal_position = (width-1,height-1)
+            for i,j in np.ndindex(maze.shape):
+                if (i,j) == goal_position:
+                    continue
+                
+                if self._is_valid(maze, (i,j), True):
+                    # Compute the grid view and legal actions for this position
+                    state, _ = self._get_partial_view(maze, (goal_position), (i,j), width, height, view_kernel_size)
+                    state[state == 2] = 0
+                    state[view_kernel_size, view_kernel_size] = 2
+
+                    enlarged_state, _ = self._get_partial_view(maze, (goal_position), (i,j), width, height, enlarged_kernel_size)
+                    enlarged_state[enlarged_state == 2] = 0
+                    enlarged_state[enlarged_kernel_size, enlarged_kernel_size] = 2
+
+                    rewards = []
+                    for action in range(len(self.motions)):
+                        new_position = (i+self.motions[action][0], j+self.motions[action][1])
+                        rewards += [1] if self._is_valid(maze, new_position, True) else [0]
+
+                    key = tuple(rewards)
+                    if key not in counts:
+                        counts[key] = 1
+                        states.append([state, enlarged_state, rewards])
+                    else:
+                        if counts[key] < limit:
+                            counts[key] += 1
+                            states.append([state, enlarged_state, rewards])
+                        else:
+                            continue
+        return states, counts
+
+
 if __name__ == "__main__":
     """
     from gymnasium.envs.registration import register
@@ -603,5 +641,34 @@ if __name__ == "__main__":
                 'views': views,
                 'mazes': mazes
             }, f)
+    '''
+    # ========================================================================================
+    
+    import pickle
+    env = RandomMaze()
+    view_kernel_size=2
+    width=101
+    height=101
+    complexity=0.9
+    density=0.9
+    maze_count=25
+    enlarged_kernel_size=5
+    limit=10
+    maze_count=100
+    Path('./visconf_maze/').mkdir(parents=True, exist_ok=True)
+    filepath = f'./visconf_maze/{view_kernel_size}_{enlarged_kernel_size}_{limit}_{maze_count}_{width}_{height}_{complexity}_{density}.pkl'
+    if Path(filepath).exists() == False:
+        states, counts = env.get_experiment_grid_view(view_kernel_size, enlarged_kernel_size, limit, maze_count, width, height, complexity, density)
+        with open(filepath, 'wb') as f:
+            pickle.dump({
+                'states': states,
+                'counts': counts
+            }, f)
+    
+
+    '''
+    with open('./visconf_maze/2_5_10_25_101_101_0.9_0.9.pkl', 'rb') as f:
+        data = pickle.load(f)
+    _ = 1
     '''
     # ========================================================================================
